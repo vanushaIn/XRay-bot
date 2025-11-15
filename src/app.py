@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import json
 import asyncio
 import logging
@@ -6,10 +7,11 @@ import coloredlogs
 from config import config
 from aiogram import Bot, Dispatcher
 from aiogram.types import PreCheckoutQuery
-from handlers import setup_handlers
+from handlers import router as handlers_router, webhook_routes
 from datetime import datetime, timedelta
 from functions import delete_client_by_email
-from database import Session, User, init_db, get_all_users, delete_user_profile
+from database import Session, User, init_db, get_all_users, delete_user_profile, MessageHistory
+from aiohttp import web
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -25,8 +27,8 @@ async def check_subscriptions(bot: Bot):
             users = await get_all_users()
             
             for user in users:
-                # Проверка за 1 день до окончания
-                if user.subscription_end - now < timedelta(days=1) and user.subscription_end >= now and not user.notified:
+                # Проверка за 1 день до окончания (только если subscription_end не None)
+                if (user.subscription_end and user.subscription_end - now < timedelta(days=1) and user.subscription_end >= now and not user.notified):
                     try:
                         await bot.send_message(
                             user.telegram_id,
@@ -41,8 +43,8 @@ async def check_subscriptions(bot: Bot):
                     except Exception as e:
                         logger.warning(f"⚠️ Notification error: {e}")
                 
-                # Проверка истечения подписки
-                if user.subscription_end <= now and user.vless_profile_data:
+                # Проверка истечения подписки (только если subscription_end не None)
+                if (user.subscription_end and user.subscription_end <= now and user.vless_profile_data):
                     try:
                         profile = json.loads(user.vless_profile_data)
                         # Удаляем из инбаунда
@@ -87,44 +89,65 @@ async def update_admins_status():
         session.commit()
     logger.info("✅ Admin status updated in database")
 
+async def cleanup_old_message_history():
+    """Фоновая задача для удаления очень старых сообщений из БД"""
+    while True:
+        try:
+            with Session() as session:
+                # Удаляем записи старше 7 дней
+                cutoff_date = datetime.utcnow() - timedelta(days=7)
+                deleted_count = session.query(MessageHistory).filter(
+                    MessageHistory.created_at < cutoff_date
+                ).delete()
+                session.commit()
+                
+                if deleted_count > 0:
+                    logger.info(f"🧹 Deleted {deleted_count} old message history records")
+                    
+        except Exception as e:
+            logger.error(f"🛑 Message history cleanup error: {e}")
+        
+        await asyncio.sleep(24 * 3600)  # Раз в день
+        
 async def main():
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher()
-    
+
     try:
         await init_db()
-        logger.info("✅ Database initialized")
-
-        # Обновляем статус администраторов
+        logger.info("Database initialized")
         await update_admins_status()
     except Exception as e:
-        logger.error(f"❌ Database initialization error: {e}")
+        logger.error(f"Database initialization error: {e}")
         return
-    
+
     try:
-        setup_handlers(dp)
-        logger.info("✅ Handlers registered")
+        dp.include_router(handlers_router)
+        logger.info("Handlers registered")
     except Exception as e:
-        logger.error(f"❌ Handler registration error: {e}")
+        logger.error(f"Handler registration error: {e}")
         return
-    
-    # Обработчик для предварительной проверки платежа
-    @dp.pre_checkout_query()
-    async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
-        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-    
-    # Запускаем фоновую задачу проверки подписок
-    try:
-        asyncio.create_task(check_subscriptions(bot))
-    except Exception as e:
-        logger.error(f"❌ Subscription check task failed to start: {e}")
-    
-    logger.info("ℹ️  Starting bot...")
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"❌ Bot start error: {e}")
-        return
+
+    # Создаём веб-приложение
+    app = web.Application()
+    app['bot'] = bot  # Передаём бота в приложение
+
+    # Добавляем маршруты вебхуков
+    app.router.add_routes(webhook_routes)
+
+    # Запускаем веб-сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8443)
+    await site.start()
+    logger.info("Webhook server running on port 8443")
+
+    # Фоновые задачи
+    asyncio.create_task(check_subscriptions(bot))
+    asyncio.create_task(cleanup_old_message_history())
+
+    logger.info("Starting bot...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
