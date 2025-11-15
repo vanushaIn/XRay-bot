@@ -1,10 +1,11 @@
+# -*- coding: utf-8 -*-
 import aiohttp
 import uuid
 import json
 import logging
 import random
 from config import config
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 logger = logging.getLogger(__name__)
 
@@ -421,10 +422,10 @@ class XUIAPI:
                                     online += 1
                         return online
                 except:
-                    return 0
+                    return online
         except Exception as e:
             logger.error(f"🛑 Stats error: {e}")
-        return {"upload": 0, "download": 0}
+        return 0
 
     async def close(self):
         if self.session:
@@ -476,14 +477,20 @@ def generate_vless_url(profile_data: dict) -> str:
     remark = profile_data.get('remark', '')
     email = profile_data['email']
     fragment = f"{remark}-{email}" if remark else email
-    
+
+    # УБИРАЕМ https:// из адреса — v2RayTun не понимает
+    host = config.XUI_HOST.replace("https://", "").replace("http://", "")
+
+    # ЭКРАНИРУЕМ spx, чтобы ? и & не ломали парсинг
+    spx_encoded = quote(config.REALITY_SPIDER_X, safe='')
+
     return (
-        f"vless://{profile_data['client_id']}@{config.XUI_HOST}:{profile_data['port']}"
+        f"vless://{profile_data['client_id']}@{host}:{profile_data['port']}"
         f"?type=tcp&security=reality"
         f"&pbk={config.REALITY_PUBLIC_KEY}"
         f"&fp={config.REALITY_FINGERPRINT}"
         f"&sni={config.REALITY_SNI}"
         f"&sid={config.REALITY_SHORT_ID}"
-        f"&spx={config.REALITY_SPIDER_X}"
+        f"&spx={spx_encoded}"
         f"#{fragment}"
     )
