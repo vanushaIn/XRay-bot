@@ -22,6 +22,13 @@ class Config(BaseModel):
     REALITY_SHORT_ID: str = os.getenv("REALITY_SHORT_ID", "1234567890")
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
 
+    # Happ API
+    HAPP_PROVIDER_CODE: str = os.getenv("HAPP_PROVIDER_CODE", "")
+    HAPP_AUTH_KEY: str = os.getenv("HAPP_AUTH_KEY", "")
+    HAPP_API_URL: str = os.getenv("HAPP_API_URL", "https://api.happ-proxy.com/api/add-install")
+    HAPP_PORT: int = int(os.getenv("HAPP_PORT", "8000"))
+    
+
     # Настройки цен и скидок
     PRICES: Dict[int, Dict[str, int]] = {
         1: {"base_price": 250, "discount_percent": 0},
@@ -29,6 +36,21 @@ class Config(BaseModel):
         6: {"base_price": 1500, "discount_percent": 20},
         12: {"base_price": 3000, "discount_percent": 30}
     }
+
+    # Цены в Telegram Stars (XTR) за период подписки
+    # Значения — количество звёзд, можно настроить под себя
+    STARS_PRICES: Dict[int, int] = {
+        1: 1,
+        3: 250,
+        6: 450,
+        12: 800
+    }
+
+    # Инструкция/ссылка для оплаты через Crypto Bot (настраивается через .env)
+    CRYPTOBOT_INFO: str = os.getenv(
+        "CRYPTOBOT_INFO",
+        "Для оплаты через Crypto Bot отправьте USDT на нашего бота и отправьте чек администратору."
+    )
 
     @field_validator('ADMINS', mode='before')
     def parse_admins(cls, value):
@@ -53,6 +75,10 @@ class Config(BaseModel):
         
         discount_amount = (base_price * discount_percent) // 100
         return base_price - discount_amount
+
+    def calculate_stars_price(self, months: int) -> int:
+        """Возвращает цену в звёздах (XTR) за выбранный период"""
+        return self.STARS_PRICES.get(months, 0)
 
 config = Config(
     ADMINS=os.getenv("ADMINS", ""),

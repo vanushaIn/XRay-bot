@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import uuid
 from datetime import datetime, timedelta
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
@@ -15,7 +16,7 @@ from database import (
     User, Session, get_user_stats as db_user_stats
 )
 from functions import create_vless_profile, delete_client_by_email, generate_vless_url, get_user_stats, create_static_client, get_global_stats, get_online_users
-
+from functions import create_happ_limited_link
 logger = logging.getLogger(__name__)
 
 router = Router()
@@ -57,7 +58,7 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     if not user:
         return
     
-    status = "Активна" if user.subscription_end > datetime.utcnow() else "Истекла"
+    status = "Активна" if user.subscription_end and user.subscription_end > datetime.utcnow() else "Истекла"
     expire_date = user.subscription_end.strftime("%d-%m-%Y %H:%M") if status == "Активна" else status
     
     text = (
@@ -71,12 +72,13 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     builder.button(text="💵 Продлить" if status=="Активна" else "💵 Оплатить", callback_data="renew_sub")
     builder.button(text="✅ Подключить", callback_data="connect")
     builder.button(text="📊 Статистика", callback_data="stats")
+    builder.button(text="👥 Рефералы", callback_data="ref_program")
     builder.button(text="ℹ️ Помощь", callback_data="help")
     
     if user.is_admin:
         builder.button(text="⚠️ Админ. меню", callback_data="admin_menu")
     
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 1, 1)
     
     if message_id:
         # Редактируем существующее сообщение
@@ -99,10 +101,21 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
 @router.message(Command("start"))
 async def start_cmd(message: Message, bot: Bot):
     logger.info(f"ℹ️  Start command from {message.from_user.id}")
+
+    # Разбираем реферальный параметр, если он есть (/start ref_12345)
+    referrer_id = None
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].startswith("ref_"):
+        try:
+            referrer_id = int(parts[1].split("_", 1)[1])
+        except ValueError:
+            referrer_id = None
+
     user = await get_user(message.from_user.id)
     
     # Обновляем данные пользователя если они изменились
     update_data = {}
+    is_new_user = False
     if user:
         if user.full_name != message.from_user.full_name:
             update_data["full_name"] = message.from_user.full_name
@@ -116,8 +129,38 @@ async def start_cmd(message: Message, bot: Bot):
             username=message.from_user.username,
             is_admin=is_admin
         )
-        await message.answer(f"Добро пожаловать в VPN бота `{(await bot.get_me()).full_name}`!\nВам предоставлен **бесплатный** тестовый период на **3 дня**!", parse_mode='Markdown')
+        is_new_user = True
+        await message.answer(
+            f"Добро пожаловать в VPN бота `{(await bot.get_me()).full_name}`!\n"
+            f"Вам предоставлен **бесплатный** тестовый период на **3 дня**!",
+            parse_mode='Markdown'
+        )
         await asyncio.sleep(2)
+
+        # Если пользователь пришел по реферальной ссылке, начисляем бонус
+        if referrer_id and referrer_id != message.from_user.id:
+            ref_user = await get_user(referrer_id)
+            if ref_user:
+                # Приглашенному и пригласившему добавляем по 1 месяцу подписки
+                await update_subscription(message.from_user.id, 1)
+                await update_subscription(referrer_id, 1)
+
+                suffix = "месяц"
+                await message.answer(
+                    "🎁 Вы зарегистрировались по реферальной ссылке!\n"
+                    f"Вам и вашему другу начислено по **1 {suffix}** VPN.",
+                    parse_mode="Markdown"
+                )
+                try:
+                    await bot.send_message(
+                        referrer_id,
+                        f"🎉 По вашей реферальной ссылке зарегистрировался новый пользователь "
+                        f"`{user.full_name}` (`{user.telegram_id}`).\n"
+                        f"Вам начислен **1 {suffix}** VPN.",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"🛑 Failed to notify referrer {referrer_id}: {e}")
     
     # Обновляем данные если есть изменения
     if update_data:
@@ -129,6 +172,56 @@ async def start_cmd(message: Message, bot: Bot):
             logger.info(f"🔄 Updated user data: {message.from_user.id}")
     
     await show_menu(bot, message.from_user.id)
+
+
+@router.message(Command("ref"))
+async def referral_cmd(message: Message, bot: Bot):
+    """Отправляет пользователю его реферальную ссылку"""
+    user = await get_user(message.from_user.id)
+    if not user:
+        # Если пользователя нет в БД, проводим через стандартный /start
+        await start_cmd(message, bot)
+        return
+
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
+
+    text = (
+        "👥 **Реферальная программа**\n\n"
+        "За каждого друга, который запустит бота по вашей ссылке, "
+        "вы и он получаете по **1 месяц** VPN.\n\n"
+        f"Ваша персональная ссылка:\n`{link}`"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "ref_program")
+async def referral_program_callback(callback: CallbackQuery, bot: Bot):
+    """Кнопка реферальной программы в меню"""
+    await callback.answer()
+    user = await get_user(callback.from_user.id)
+    if not user:
+        # Если пользователя нет в БД, проводим через стандартный /start
+        fake_message = Message(
+            message_id=callback.message.message_id,
+            date=callback.message.date,
+            chat=callback.message.chat,
+            from_user=callback.from_user,
+            text="/start"
+        )
+        await start_cmd(fake_message, bot)
+        return
+
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
+
+    text = (
+        "👥 **Реферальная программа**\n\n"
+        "За каждого друга, который запустит бота по вашей ссылке, "
+        "вы и он получаете по **1 месяц** VPN.\n\n"
+        f"Ваша персональная ссылка:\n`{link}`"
+    )
+    await callback.message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("menu"))
 async def menu_cmd(message: Message, bot: Bot):
@@ -173,18 +266,17 @@ async def help_msg(callback: CallbackQuery):
 async def renew_subscription(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
     
-    # Добавляем кнопки для каждого варианта подписки
-    for months in sorted(config.PRICES.keys()):
-        price_info = config.PRICES[months]
-        final_price = config.calculate_price(months)
-        
-        discount_text = ""
-        if price_info["discount_percent"] > 0:
-            discount_text = f" (-{price_info['discount_percent']}%)"
-            
-        button_text = f"{months} мес. - {final_price} руб.{discount_text}"
-        builder.button(text=button_text, callback_data=f"pay_{months}")
-    
+    # Кнопки оплаты через Telegram Stars (XTR)
+    for months in sorted(config.STARS_PRICES.keys()):
+        stars_price = config.calculate_stars_price(months)
+        if stars_price <= 0:
+            continue
+        button_text = f"⭐ {months} мес. - {stars_price} звёзд"
+        builder.button(text=button_text, callback_data=f"pay_star_{months}")
+
+    # Отдельная кнопка с оплатой через Crypto Bot (USDT/крипта)
+    builder.button(text="💳 Crypto Bot (USDT)", callback_data="crypto_payment")
+
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(1)
     
@@ -194,38 +286,50 @@ async def renew_subscription(callback: CallbackQuery):
         parse_mode='Markdown'
     )
 
-@router.callback_query(F.data.startswith("pay_"))
-async def process_payment(callback: CallbackQuery, bot: Bot):
+
+@router.callback_query(F.data == "crypto_payment")
+async def crypto_payment_info(callback: CallbackQuery):
+    """Показывает информацию/ссылку для оплаты через Crypto Bot"""
+    await callback.answer()
+    text = (
+        "💳 **Оплата через Crypto Bot**\n\n"
+        f"{config.CRYPTOBOT_INFO}"
+    )
+    await callback.message.answer(text, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("pay_star_"))
+async def process_stars_payment(callback: CallbackQuery, bot: Bot):
+    """Оплата подписки с помощью Telegram Stars (XTR)"""
     await callback.answer()
     
     try:
-        months = int(callback.data.split("_")[1])
-        if months not in config.PRICES:
+        months = int(callback.data.split("_")[2])
+        if months not in config.STARS_PRICES:
             await callback.message.answer("❌ Неверный период подписки")
             return
             
-        final_price = config.calculate_price(months)
+        stars_price = config.calculate_stars_price(months)
         suffix = "месяц" if months == 1 else "месяца" if months in (2,3,4) else "месяцев"
-        # Создаем инвойс для оплаты
-        prices = [LabeledPrice(label=f"VPN подписка на {months} мес.", amount=final_price * 100)]
-        if config.PAYMENT_TOKEN:
-            await bot.send_invoice(
-                chat_id=callback.from_user.id,
-                title=f"VPN подписка на {months} месяцев",
-                description=f"Доступ к VPN сервису на {months} {suffix}",
-                payload=f"subscription_{months}",
-                provider_token=config.PAYMENT_TOKEN,
-                currency="RUB",
-                prices=prices,
-                start_parameter="create_subscription",
-                need_email=True,
-                need_phone_number=False
-            )
-        else:
-            await callback.message.answer("❌ Оплата временно недоступна")
+
+        # Для Stars валюта XTR, provider_token не используется
+        prices = [LabeledPrice(label=f"VPN подписка на {months} мес. (звёзды)", amount=stars_price)]
+
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title=f"VPN подписка на {months} {suffix}",
+            description=f"Доступ к VPN сервису на {months} {suffix}, оплата Telegram Stars",
+            payload=f"stars_{months}",
+            provider_token=None,  # для XTR провайдер не нужен
+            currency="XTR",
+            prices=prices,
+            start_parameter="stars_subscription",
+            need_email=False,
+            need_phone_number=False
+        )
     except Exception as e:
-        logger.error(f"🛑 Payment error: {e}")
-        await callback.message.answer("❌ Ошибка при создании счета на оплату")
+        logger.error(f"🛑 Stars payment error: {e}")
+        await callback.message.answer("❌ Ошибка при создании счета на оплату звёздами")
 
 @router.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot):
@@ -236,36 +340,88 @@ async def process_successful_payment(message: Message, bot: Bot):
     try:
         # Извлекаем информацию из payload
         payload = message.successful_payment.invoice_payload
-        if payload.startswith("subscription_"):
+        user = await get_user(message.from_user.id)
+        if not user:
+            await message.answer("❌ Ошибка: пользователь не найден")
+            return
+
+        now = datetime.utcnow()
+        action_type = "продлена" if (user.subscription_end and user.subscription_end > now) else "куплена"
+
+        # --- Обновляем подписку в БД (уже есть) ---
+        if payload.startswith("stars_"):
             months = int(payload.split("_")[1])
-            final_price = config.calculate_price(months)  # Переводим обратно в рубли
-            
-            # Получаем информацию о пользователе
-            user = await get_user(message.from_user.id)
-            if not user:
-                await message.answer("❌ Ошибка: пользователь не найден")
-                return
-            
-            # Определяем тип действия (покупка или продление)
-            now = datetime.utcnow()
-            action_type = "продлена" if user.subscription_end > now else "куплена"
-            
-            # Обновляем подписку
+            stars_price = config.calculate_stars_price(months)
+
             success = await update_subscription(message.from_user.id, months)
             suffix = "месяц" if months == 1 else "месяца" if months in (2,3,4) else "месяцев"
+            
             if success:
-                await message.answer(
-                    f"✅ Оплата прошла успешно! Ваша подписка {action_type} на {months} {suffix}.\n\n"
+                # --- Создаём VPN-профиль, если его ещё нет ---
+                profile_data = None
+                if not user.vless_profile_data:
+                    profile_data = await create_vless_profile(user.telegram_id)
+                    if profile_data:
+                        with Session() as session:
+                            db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                            if db_user:
+                                db_user.vless_profile_data = json.dumps(profile_data)
+                                session.commit()
+                else:
+                    profile_data = safe_json_loads(user.vless_profile_data)
+
+                # --- Формируем ссылки для пользователя ---
+                vless_url = None
+                happ_url = None
+                if profile_data:
+                    vless_url = generate_vless_url(profile_data)
+
+                    # Создаём Happ limited link (лимит устройств можно задать, например, 3)
+                    install_code = await create_happ_limited_link(3)  # или брать из тарифа
+                    if install_code:
+                        # Сохраняем install_code в БД
+                        with Session() as session:
+                            db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                            if db_user:
+                                db_user.happ_install_code = install_code
+                                session.commit()
+                        # Формируем URL для Happ (предполагаем, что subscription_token уже есть или создаём)
+                        if not user.subscription_token:
+                            # Создаём токен, если его нет
+                            token = str(uuid.uuid4())
+                            with Session() as session:
+                                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                                if db_user:
+                                    db_user.subscription_token = token
+                                    session.commit()
+                        token = user.subscription_token or (await get_user(user.telegram_id)).subscription_token
+                        # Здесь нужно указать ваш домен и порт, где висит сервер подписок (например, тот же, что и бот, или отдельный)
+                        # Порт указан в логах как 8000, можно добавить в config
+                        base_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{token}"
+                        happ_url = f"{base_url}#Happ?installid={install_code}"
+                    else:
+                        happ_url = "Не удалось создать ограниченную ссылку."
+
+                # --- Отправляем пользователю результат ---
+                answer_text = (
+                    f"✅ Оплата звёздами прошла успешно! Ваша подписка {action_type} на {months} {suffix}.\n\n"
                     "Спасибо за покупку! 🎉"
                 )
-                
-                # Отправляем уведомление администраторам
+                if vless_url:
+                    answer_text += f"\n\n📱 **VLESS ссылка для подключения:**\n`{vless_url}`"
+                if happ_url and "Не удалось" not in happ_url:
+                    answer_text += f"\n\n🔗 **Happ ссылка (лимит устройств 3):**\n`{happ_url}`"
+                elif happ_url:
+                    answer_text += f"\n\n⚠️ {happ_url}"
+
+                await message.answer(answer_text, parse_mode="Markdown")
+
+                # Уведомление администраторам (как было)
                 admin_message = (
-                    f"{action_type.capitalize()} подписка пользователем "
+                    f"{action_type.capitalize()} подписка (звёзды) пользователем "
                     f"`{user.full_name}` | `{user.telegram_id}` "
-                    f"на {months} {suffix} - {final_price}₽"
+                    f"на {months} {suffix} - {stars_price}⭐"
                 )
-                
                 for admin_id in config.ADMINS:
                     try:
                         await bot.send_message(admin_id, admin_message, parse_mode='Markdown')
@@ -344,10 +500,11 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
         with Session() as session:
             user = session.query(User).filter_by(telegram_id=user_id).first()
             if user:
-                if user.subscription_end > datetime.utcnow():
+                now = datetime.utcnow()
+                if user.subscription_end and user.subscription_end > now:
                     user.subscription_end += timedelta(seconds=total_seconds)
                 else:
-                    user.subscription_end = datetime.utcnow() + timedelta(seconds=total_seconds)
+                    user.subscription_end = now + timedelta(seconds=total_seconds)
                 session.commit()
                 await message.answer(f"✅ Добавлено время пользователю {user_id}")
             else:
@@ -395,10 +552,13 @@ async def admin_remove_time_amount(message: Message, state: FSMContext):
         with Session() as session:
             user = session.query(User).filter_by(telegram_id=user_id).first()
             if user:
-                new_end = user.subscription_end - timedelta(seconds=total_seconds)
-                # Проверяем, чтобы не ушло в прошлое
-                if new_end < datetime.utcnow():
-                    new_end = datetime.utcnow()
+                now = datetime.utcnow()
+                if user.subscription_end:
+                    new_end = user.subscription_end - timedelta(seconds=total_seconds)
+                    if new_end < now:
+                        new_end = now
+                else:
+                    new_end = now
                 user.subscription_end = new_end
                 session.commit()
                 await message.answer(f"✅ Удалено время у пользователя {user_id}")
@@ -604,11 +764,20 @@ async def connect_profile(callback: CallbackQuery):
     if not user:
         await callback.answer("🛑 Ошибка профиля")
         return
-    
-    if user.subscription_end < datetime.utcnow():
+
+    if user.subscription_end and user.subscription_end < datetime.utcnow():
         await callback.answer("⚠️ Подписка истекла! Продлите подписку.")
         return
-    
+
+    # Гарантируем наличие токена подписки для Happ
+    if not getattr(user, "subscription_token", None):
+        with Session() as session:
+            db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+            if db_user and not db_user.subscription_token:
+                db_user.subscription_token = str(uuid.uuid4())
+                session.commit()
+        user = await get_user(user.telegram_id)
+
     if not user.vless_profile_data:
         await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
         profile_data = await create_vless_profile(user.telegram_id)
@@ -629,6 +798,32 @@ async def connect_profile(callback: CallbackQuery):
         await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
         return
     vless_url = generate_vless_url(profile_data)
+
+    # --- Логика Happ с ограничением устройств ---
+    subscription_url = None
+    if user.subscription_end and user.subscription_end > datetime.utcnow():
+        # Убедимся, что у пользователя есть install_code (если нет — создадим)
+        if not user.happ_install_code:
+            device_limit = getattr(user, 'device_limit', 3)  # можно задать значение по умолчанию
+            install_code = await create_happ_limited_link(device_limit)
+            if install_code:
+                with Session() as session:
+                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                    if db_user:
+                        db_user.happ_install_code = install_code
+                        session.commit()
+                # Обновляем объект user
+                user = await get_user(user.telegram_id)
+
+        # Если теперь есть install_code, формируем ссылку с installid
+        if user.happ_install_code and user.subscription_token:
+            base_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{user.subscription_token}"
+            subscription_url = f"{base_url}#Happ?installid={user.happ_install_code}"
+        elif user.subscription_token:
+            # Если install_code не удалось создать, даём обычную ссылку (без ограничений)
+            subscription_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{user.subscription_token}"
+
+    # Формируем текст сообщения
     text = (
         "🎉 **Ваш VPN профиль готов!**\n\n"
         "ℹ️ **Инструкция по подключению:**\n"
@@ -637,6 +832,13 @@ async def connect_profile(callback: CallbackQuery):
         f"`{vless_url}`\n\n"
         "3. Активируйте соединение в приложении."
     )
+
+    if subscription_url:
+        text += (
+            "\n\n"
+            "📱 **Подписка для Happ:**\n"
+            f"`{subscription_url}`"
+        )
 
     builder = InlineKeyboardBuilder()
     builder.button(text='🖥️ Windows [V2RayN]', url='https://github.com/2dust/v2rayN/releases/download/7.13.8/v2rayN-windows-64-desktop.zip')
@@ -648,7 +850,6 @@ async def connect_profile(callback: CallbackQuery):
     builder.adjust(2, 2, 1, 1)
 
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='Markdown')
-
 @router.callback_query(F.data == "stats")
 async def user_stats(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)

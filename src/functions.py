@@ -13,6 +13,12 @@ class XUIAPI:
         self.session = None
         self.cookie_jar = aiohttp.CookieJar(unsafe=True)  # Разрешаем небезопасные куки
         self.auth_cookies = None
+        # Формируем базовый URL с учётом базового пути
+        self.base_url = config.XUI_API_URL.rstrip('/')
+        self.api_prefix = "/panel/api"
+        base_path = (config.XUI_BASE_PATH or '').strip('/')
+        if base_path:
+            self.base_url = f"{self.base_url}/{base_path}"
 
     async def login(self):
         """Аутентификация в 3x-UI API"""
@@ -28,12 +34,7 @@ class XUIAPI:
                 "password": config.XUI_PASSWORD
             }
             
-            # Формируем URL с учетом базового пути
-            base_url = config.XUI_API_URL.rstrip('/')
-            # base_path = config.XUI_BASE_PATH.strip('/')
-            # if base_path:
-            #     base_url = f"{base_url}/{base_path}"
-            login_url = f"{base_url}/login"
+            login_url = f"{self.base_url}/login"
             
             logger.info(f"ℹ️  Trying login to {login_url} with user: {config.XUI_USERNAME}")
             
@@ -72,11 +73,7 @@ class XUIAPI:
     async def get_inbound(self, inbound_id: int):
         """Получение данных инбаунда"""
         try:
-            base_url = config.XUI_API_URL.rstrip('/')
-            base_path = config.XUI_BASE_PATH.strip('/')
-            if base_path:
-                base_url = f"{base_url}/{base_path}"
-            url = f"{base_url}/api/inbounds/get/{inbound_id}"
+            url = f"{self.base_url}{self.api_prefix}/inbounds/get/{inbound_id}"
             
             logger.info(f"ℹ️  Getting inbound data from: {url}")
             logger.debug(f"⚙️ Using cookies: {self.cookie_jar}")
@@ -87,7 +84,7 @@ class XUIAPI:
                 
                 if resp.status != 200:
                     text = await resp.text()
-                    logger.error(f"🛑 Get inbound failed: status={resp.status}, response={text[:100]}...")
+                    logger.error(f"🛑 Get inbound failed: status={resp.status}, response={text}...")
                     return None
                 
                 try:
@@ -109,11 +106,7 @@ class XUIAPI:
     async def update_inbound(self, inbound_id: int, data: dict):
         """Обновление инбаунда"""
         try:
-            base_url = config.XUI_API_URL.rstrip('/')
-            base_path = config.XUI_BASE_PATH.strip('/')
-            if base_path:
-                base_url = f"{base_url}/{base_path}"
-            url = f"{base_url}/api/inbounds/update/{inbound_id}"
+            url = f"{self.base_url}{self.api_prefix}/inbounds/update/{inbound_id}"
             
             logger.info(f"ℹ️  Updating inbound at: {url}")
             
@@ -335,11 +328,7 @@ class XUIAPI:
             return {"upload": 0, "download": 0}
         
         try:
-            base_url = config.XUI_API_URL.rstrip('/')
-            base_path = config.XUI_BASE_PATH.strip('/')
-            if base_path:
-                base_url = f"{base_url}/{base_path}"
-            url = f"{base_url}/api/inbounds/getClientTraffics/{email}"
+            url = f"{self.base_url}{self.api_prefix}/inbounds/getClientTraffics/{email}"
             
             async with self.session.get(url) as resp:
                 if resp.status != 200:
@@ -361,17 +350,13 @@ class XUIAPI:
         return {"upload": 0, "download": 0}
     
     async def get_global_stats(self, inbound_id: int):
-        """Получение статистики по email"""
+        """Получение статистики инбаунда"""
         if not await self.login():
             logger.error("🛑 Login failed before getting stats")
             return {"upload": 0, "download": 0}
         
         try:
-            base_url = config.XUI_API_URL.rstrip('/')
-            base_path = config.XUI_BASE_PATH.strip('/')
-            if base_path:
-                base_url = f"{base_url}/{base_path}"
-            url = f"{base_url}/api/inbounds/get/{inbound_id}"
+            url = f"{self.base_url}{self.api_prefix}/inbounds/get/{inbound_id}"
             
             async with self.session.get(url) as resp:
                 if resp.status != 200:
@@ -393,21 +378,17 @@ class XUIAPI:
         return {"upload": 0, "download": 0}
 
     async def get_online_users(self):
+        """Получение количества онлайн пользователей"""
         if not await self.login():
-            logger.error("🛑 Login failed before getting stats")
-            return {"upload": 0, "download": 0}
+            logger.error("🛑 Login failed before getting online users")
+            return 0
         
         try:
-            base_url = config.XUI_API_URL.rstrip('/')
-            base_path = config.XUI_BASE_PATH.strip('/')
-            if base_path:
-                base_url = f"{base_url}/{base_path}"
-            url = f"{base_url}/api/inbounds/onlines"
+            url = f"{self.base_url}{self.api_prefix}/inbounds/onlines"
             
             async with self.session.post(url) as resp:
                 if resp.status != 200:
                     return 0
-
                 
                 try:
                     data = await resp.json()
@@ -424,12 +405,36 @@ class XUIAPI:
                     return 0
         except Exception as e:
             logger.error(f"🛑 Stats error: {e}")
-        return {"upload": 0, "download": 0}
+            return 0
 
     async def close(self):
         if self.session:
             await self.session.close()
-
+async def create_happ_limited_link(install_limit: int) -> str | None:
+    """
+    Создаёт ограниченную ссылку через API Happ.
+    Возвращает install_code или None при ошибке.
+    """
+    url = config.HAPP_API_URL
+    params = {
+        "provider_code": config.HAPP_PROVIDER_CODE,
+        "auth_key": config.HAPP_AUTH_KEY,
+        "install_limit": install_limit
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("rc") == 1:
+                        return data.get("install_code")
+                    else:
+                        logger.error(f"Happ API error: {data.get('msg')}")
+                else:
+                    logger.error(f"Happ API HTTP error: {resp.status}")
+        except Exception as e:
+            logger.exception(f"Happ API exception: {e}")
+    return None
 async def create_vless_profile(telegram_id: int):
     api = XUIAPI()
     try:

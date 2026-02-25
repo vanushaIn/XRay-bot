@@ -1,7 +1,8 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,9 @@ class User(Base):
     vless_profile_data = Column(String)
     is_admin = Column(Boolean, default=False)
     notified = Column(Boolean, default=False)
+    subscription_token = Column(String, unique=True)
+    happ_install_code = Column(String, nullable=True)  # код от Happ
+    device_limit = Column(Integer, default=1)  # лимит устройств (можно брать из тарифа)
 
 class StaticProfile(Base):
     __tablename__ = 'static_profiles'
@@ -32,6 +36,15 @@ Session = sessionmaker(bind=engine)
 
 async def init_db():
     Base.metadata.create_all(engine)
+
+    # Добавляем недостающие колонки в существующую БД (если нужно)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN subscription_token VARCHAR"))
+    except Exception:
+        # Колонка уже существует или БД ещё не создана полностью
+        pass
+
     logger.info("✅ Database tables created")
 
 async def get_user(telegram_id: int):
@@ -45,7 +58,8 @@ async def create_user(telegram_id: int, full_name: str, username: str = None, is
             full_name=full_name,
             username=username,
             subscription_end=datetime.utcnow() + timedelta(days=3),
-            is_admin=is_admin
+            is_admin=is_admin,
+            subscription_token=str(uuid.uuid4())
         )
         session.add(user)
         session.commit()
