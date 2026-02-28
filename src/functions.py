@@ -667,6 +667,15 @@ async def apply_tc_limit(ip: str):
     except subprocess.CalledProcessError as e:
         logger.error(f"❌ Failed to apply tc limit for {ip}: {e}")
 
+def safe_json_loads(data, default=None):
+    """Безопасно парсит JSON, возвращает default при ошибке."""
+    if not data:
+        return default
+    try:
+        return json.loads(data)
+    except Exception:
+        return default
+
 async def remove_tc_limit(ip: str):
     """Удаляет ограничение скорости для IP"""
     try:
