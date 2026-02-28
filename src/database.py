@@ -23,6 +23,7 @@ class User(Base):
     subscription_token = Column(String, unique=True)
     happ_install_code = Column(String, nullable=True)  # код от Happ
     device_limit = Column(Integer, default=1)  # лимит устройств (можно брать из тарифа)
+    is_enabled_in_panel = Column(Boolean, default=True)
 
 class StaticProfile(Base):
     __tablename__ = 'static_profiles'

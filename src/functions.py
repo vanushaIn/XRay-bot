@@ -1,5 +1,7 @@
 import aiohttp
 import uuid
+
+from datetime import datetime, timedelta
 import json
 import logging
 import random
@@ -19,6 +21,7 @@ class XUIAPI:
         base_path = (config.XUI_BASE_PATH or '').strip('/')
         if base_path:
             self.base_url = f"{self.base_url}/{base_path}"
+    
 
     async def login(self):
         """Аутентификация в 3x-UI API"""
@@ -125,46 +128,44 @@ class XUIAPI:
             logger.exception(f"🛑 Update inbound error: {e}")
             return False
 
-    async def create_vless_profile(self, telegram_id: int):
-        """Создание нового клиента для пользователя"""
+    async def create_vless_profile(self, telegram_id: int, subscription_days: int = 0):
+        """Создание нового клиента для пользователя (expiryTime всегда 0)"""
         if not await self.login():
             logger.error("🛑 Login failed before creating profile")
             return None
-        
+
         inbound = await self.get_inbound(config.INBOUND_ID)
         if not inbound:
             logger.error(f"🛑 Inbound {config.INBOUND_ID} not found")
             return None
-        
+
         try:
             settings = json.loads(inbound["settings"])
             clients = settings.get("clients", [])
-            
+
             client_id = str(uuid.uuid4())
-            email = f"user_{telegram_id}_{random.randint(1000,9999)}"
-            
-            # Обновленные настройки для Reality
+            email = f"user_{telegram_id}"
+
             new_client = {
                 "id": client_id,
                 "flow": "",
                 "email": email,
-                "limitIp": 0,
+                "limitIp": 5,
                 "totalGB": 0,
-                "expiryTime": 0,
+                "expiryTime": 0,          # всегда 0
                 "enable": True,
-                "tgId": "",
+                "tgId": f"{telegram_id}",
                 "subId": "",
                 "reset": 0,
-                # Добавляем настройки для Reality
                 "fingerprint": config.REALITY_FINGERPRINT,
                 "publicKey": config.REALITY_PUBLIC_KEY,
                 "shortId": config.REALITY_SHORT_ID,
                 "spiderX": config.REALITY_SPIDER_X
             }
-            
+
             clients.append(new_client)
             settings["clients"] = clients
-            
+
             update_data = {
                 "up": inbound["up"],
                 "down": inbound["down"],
@@ -178,18 +179,15 @@ class XUIAPI:
                 "settings": json.dumps(settings, indent=2),
                 "streamSettings": inbound["streamSettings"],
                 "sniffing": inbound["sniffing"],
-                # "allocate": inbound["allocate"]
             }
-            
+
             if await self.update_inbound(config.INBOUND_ID, update_data):
                 return {
                     "client_id": client_id,
                     "email": email,
                     "port": inbound["port"],
-                    # Указываем тип безопасности как reality
                     "security": "reality",
                     "remark": inbound["remark"],
-                    # Добавляем необходимые параметры для Reality
                     "sni": config.REALITY_SNI,
                     "pbk": config.REALITY_PUBLIC_KEY,
                     "fp": config.REALITY_FINGERPRINT,
@@ -312,8 +310,7 @@ class XUIAPI:
                 "protocol": inbound["protocol"],
                 "settings": json.dumps(settings, indent=2),
                 "streamSettings": inbound["streamSettings"],
-                "sniffing": inbound["sniffing"],
-                "allocate": inbound["allocate"]
+                "sniffing": inbound["sniffing"]
             }
             
             return await self.update_inbound(config.INBOUND_ID, update_data)
@@ -407,7 +404,158 @@ class XUIAPI:
             logger.error(f"🛑 Stats error: {e}")
             return 0
 
+    async def update_client_expiry(self, email: str, expiry_timestamp_ms: int) -> bool:
+        if not await self.login():
+            logger.error("🛑 update_client_expiry: login failed")
+            return False
+
+        inbound = await self.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            logger.error("🛑 update_client_expiry: inbound not found")
+            return False
+
+        try:
+            settings = json.loads(inbound["settings"])
+            clients = settings.get("clients", [])
+
+            updated = False
+            for client in clients:
+                if client.get("email") == email:
+                    client["enable"] = True   # включаем клиента
+                    client["flow"] = client.get("flow", "")
+                    logger.info(f"📧 update_client_expiry: {email}")
+                    updated = True
+                    break
+
+            if not updated:
+                logger.warning(f"⚠️ update_client_expiry: client {email} not found")
+                return False
+
+            settings["clients"] = clients
+            update_data = {
+                "up": inbound["up"],
+                "down": inbound["down"],
+                "total": inbound["total"],
+                "remark": inbound["remark"],
+                "enable": inbound["enable"],
+                "expiryTime": inbound["expiryTime"],
+                "listen": inbound["listen"],
+                "port": inbound["port"],
+                "protocol": inbound["protocol"],
+                "settings": json.dumps(settings, indent=2),
+                "streamSettings": inbound["streamSettings"],
+                "sniffing": inbound["sniffing"],
+            }
+
+            return await self.update_inbound(config.INBOUND_ID, update_data)
+        except Exception as e:
+            logger.exception(f"🛑 update_client_expiry error: {e}")
+            return False
+
+    async def disable_client_by_email(self, email: str) -> bool:
+        """
+        Отключает клиента по email (enable = false), не удаляя его.
+        Возвращает True при успехе, False при ошибке.
+        """
+        if not await self.login():
+            logger.error("🛑 disable_client_by_email: login failed")
+            return False
+
+        inbound = await self.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            logger.error("🛑 disable_client_by_email: inbound not found")
+            return False
+
+        try:
+            settings = json.loads(inbound["settings"])
+            clients = settings.get("clients", [])
+
+            updated = False
+            for client in clients:
+                if client.get("email") == email:
+                    client["enable"] = False
+                    # Меняем flow для принудительного обновления UI
+                    client["flow"] = client.get("flow", "")
+                    logger.info(f"📧 disable_client_by_email: {email} disabled")
+                    updated = True
+                    break
+
+            if not updated:
+                logger.warning(f"⚠️ disable_client_by_email: client {email} not found")
+                return False
+
+            settings["clients"] = clients
+            update_data = {
+                "up": inbound["up"],
+                "down": inbound["down"],
+                "total": inbound["total"],
+                "remark": inbound["remark"],
+                "enable": inbound["enable"],
+                "expiryTime": inbound["expiryTime"],
+                "listen": inbound["listen"],
+                "port": inbound["port"],
+                "protocol": inbound["protocol"],
+                "settings": json.dumps(settings, indent=2),
+                "streamSettings": inbound["streamSettings"],
+                "sniffing": inbound["sniffing"],
+            }
+
+            return await self.update_inbound(config.INBOUND_ID, update_data)
+        except Exception as e:
+            logger.exception(f"🛑 disable_client_by_email error: {e}")
+            return False
+
+    async def enable_client(self, email: str) -> bool:
+        """Включает клиента по email (enable = true)"""
+        if not await self.login():
+            logger.error("🛑 enable_client: login failed")
+            return False
+
+        inbound = await self.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            logger.error("🛑 enable_client: inbound not found")
+            return False
+
+        try:
+            settings = json.loads(inbound["settings"])
+            clients = settings.get("clients", [])
+
+            updated = False
+            for client in clients:
+                if client.get("email") == email:
+                    client["enable"] = True
+                    client["flow"] = client.get("flow", "")
+                    logger.info(f"📧 enable_client: {email} enabled")
+                    updated = True
+                    break
+
+            if not updated:
+                logger.warning(f"⚠️ enable_client: client {email} not found")
+                return False
+
+            settings["clients"] = clients
+            update_data = {
+                "up": inbound["up"],
+                "down": inbound["down"],
+                "total": inbound["total"],
+                "remark": inbound["remark"],
+                "enable": inbound["enable"],
+                "expiryTime": inbound["expiryTime"],
+                "listen": inbound["listen"],
+                "port": inbound["port"],
+                "protocol": inbound["protocol"],
+                "settings": json.dumps(settings, indent=2),
+                "streamSettings": inbound["streamSettings"],
+                "sniffing": inbound["sniffing"],
+            }
+
+            return await self.update_inbound(config.INBOUND_ID, update_data)
+        except Exception as e:
+            logger.exception(f"🛑 enable_client error: {e}")
+            return False
+
     async def close(self):
+        """Закрывает сессию aiohttp"""
         if self.session:
             await self.session.close()
 async def create_happ_limited_link(install_limit: int) -> str | None:
@@ -435,10 +583,11 @@ async def create_happ_limited_link(install_limit: int) -> str | None:
         except Exception as e:
             logger.exception(f"Happ API exception: {e}")
     return None
-async def create_vless_profile(telegram_id: int):
+
+async def create_vless_profile(telegram_id: int, subscription_days: int = 0):
     api = XUIAPI()
     try:
-        return await api.create_vless_profile(telegram_id)
+        return await api.create_vless_profile(telegram_id, subscription_days)
     finally:
         await api.close()
 
@@ -456,10 +605,24 @@ async def delete_client_by_email(email: str):
     finally:
         await api.close()
 
+async def disable_client_by_email(email: str):
+    api = XUIAPI()
+    try:
+        return await api.disable_client_by_email(email)
+    finally:
+        await api.close()
+
 async def get_global_stats():
     api = XUIAPI()
     try:
         return await api.get_global_stats(config.INBOUND_ID)
+    finally:
+        await api.close()
+
+async def enable_client_by_email(email: str) -> bool:
+    api = XUIAPI()
+    try:
+        return await api.enable_client(email)
     finally:
         await api.close()
 
