@@ -967,17 +967,17 @@ async def connect_profile(callback: CallbackQuery):
 
     builder = InlineKeyboardBuilder()
     builder.button(
-        text='🖥️ Windows [V2RayN]',
-        url='https://github.com/2dust/v2rayN/releases/download/7.13.8/v2rayN-windows-64-desktop.zip')
+        text='🖥️ Windows [Happ]',
+        url='https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe')
     builder.button(
         text='🐧 Linux [NekoBox]',
         url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
     builder.button(
-        text='🍎 Mac [V2RayU]',
-        url='https://github.com/yanue/V2rayU/releases/download/v4.2.6/V2rayU-64.dmg ')
+        text='🍎 Mac [Happ]',
+        url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
     builder.button(
-        text='🍏 iOS [V2RayTun]',
-        url='https://apps.apple.com/ru/app/v2raytun/id6476628951')
+        text='🍏 iOS [Happ]',
+        url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
     builder.button(
         text='🤖 Android [Happ]',
         url='https://play.google.com/store/apps/details?id=com.happproxy&hl=ru')
