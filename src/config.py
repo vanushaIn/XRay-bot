@@ -40,7 +40,7 @@ class Config(BaseModel):
     # Цены в Telegram Stars (XTR) за период подписки
     # Значения — количество звёзд, можно настроить под себя
     STARS_PRICES: Dict[int, int] = {
-        1: 1,
+        1: 50,
         3: 250,
         6: 450,
         12: 800

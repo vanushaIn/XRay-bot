@@ -1,12 +1,35 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func, text, ForeignKey, UniqueConstraint
 import logging
 import uuid
 
 logger = logging.getLogger(__name__)
 
 Base = declarative_base()
+
+# database.py (дополнение)
+
+class PromoCode(Base):
+    __tablename__ = 'promocodes'
+    id = Column(Integer, primary_key=True)
+    code = Column(String, unique=True, nullable=False)          # уникальный код
+    months = Column(Integer, nullable=False)                     # количество месяцев (1-12)
+    max_uses = Column(Integer, nullable=False)                   # макс. кол-во использований (1 для одноразовых)
+    current_uses = Column(Integer, default=0)                    # сколько раз уже использован
+    is_active = Column(Boolean, default=True)                    # можно деактивировать вручную
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)                 # опционально: срок действия промокода
+
+class PromoCodeUse(Base):
+    __tablename__ = 'promocode_uses'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.telegram_id'), nullable=False)  # telegram_id
+    promocode_id = Column(Integer, ForeignKey('promocodes.id'), nullable=False)
+    used_at = Column(DateTime, default=datetime.utcnow)
+
+    # Уникальность: один пользователь не может использовать один промокод дважды
+    __table_args__ = (UniqueConstraint('user_id', 'promocode_id', name='_user_promo_uc'),)
 
 class User(Base):
     __tablename__ = 'users'

@@ -1,6 +1,6 @@
 import aiohttp
 import uuid
-
+import subprocess
 from datetime import datetime, timedelta
 import json
 import logging
@@ -145,7 +145,9 @@ class XUIAPI:
 
             client_id = str(uuid.uuid4())
             email = f"user_{telegram_id}"
-
+            if client_ip is None:
+                last_octet = (telegram_id % 253) + 2
+                client_ip = f"10.0.0.{last_octet}"
             new_client = {
                 "id": client_id,
                 "flow": "",
@@ -192,7 +194,8 @@ class XUIAPI:
                     "pbk": config.REALITY_PUBLIC_KEY,
                     "fp": config.REALITY_FINGERPRINT,
                     "sid": config.REALITY_SHORT_ID,
-                    "spx": config.REALITY_SPIDER_X
+                    "spx": config.REALITY_SPIDER_X,
+                    "client_ip": client_ip   # <-- добавьте эту строку
                 }
             return None
         except Exception as e:
@@ -655,3 +658,19 @@ def generate_vless_url(profile_data: dict) -> str:
         f"&spx={config.REALITY_SPIDER_X}"
         f"#{fragment}"
     )
+
+async def apply_tc_limit(ip: str):
+    """Применяет ограничение скорости для IP через tc (30 Мбит/с)"""
+    try:
+        subprocess.run(["/opt/XRay-bot/scripts/tc_limit.sh", ip], check=True)
+        logger.info(f"✅ tc limit applied for {ip}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Failed to apply tc limit for {ip}: {e}")
+
+async def remove_tc_limit(ip: str):
+    """Удаляет ограничение скорости для IP"""
+    try:
+        subprocess.run(["/opt/XRay-bot/scripts/tc_remove.sh", ip], check=True)
+        logger.info(f"✅ tc limit removed for {ip}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Failed to remove tc limit for {ip}: {e}")

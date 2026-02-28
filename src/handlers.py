@@ -1,16 +1,40 @@
 import asyncio
+from aiogram.fsm.state import State, StatesGroup
+from promo import activate_promo_code
 import logging
 import json
+import html
+from functions import create_vless_profile, apply_tc_limit, safe_json_loads
+from functions import apply_tc_limit
+from functions import (
+    create_vless_profile,
+    delete_client_by_email,
+    generate_vless_url,
+    get_user_stats,
+    create_static_client,
+    get_global_stats,
+    get_online_users,
+    disable_client_by_email,
+    enable_client_by_email,
+    create_happ_limited_link,
+    apply_tc_limit,        # <-- добавьте
+    remove_tc_limit         # <-- добавьте
+)
 import uuid
+from promo import get_all_promocodes_with_stats
+from aiogram.filters import StateFilter
+from promo import create_promo_code, activate_promo_code, list_promocodes
 from datetime import datetime, timedelta
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup, InlineKeyboardButton
 from config import config
 from functions import XUIAPI
+from aiogram.fsm.state import State, StatesGroup
+from promo import create_promo_code, list_promocodes, get_promo_by_code  # возможно, вам понадобятся и другие функции
 from database import (
     StaticProfile, get_user, create_user, update_subscription,
     get_all_users, create_static_profile, get_static_profiles,
@@ -24,6 +48,12 @@ router = Router()
 
 MAX_MESSAGE_LENGTH = 4096
 
+class AdminPromoStates(StatesGroup):
+    choosing_type = State()          # выбор типа (одноразовый/многоразовый)
+    entering_months = State()        # ввод количества месяцев (1-12)
+    entering_max_uses = State()      # ввод макс. количества использований (для многоразовых)
+    entering_custom_code = State()   # ввод своего кода или пропуск (автогенерация)
+    confirming = State()              # подтверждение создания
 
 class AdminStates(StatesGroup):
     ADD_TIME = State()
@@ -36,6 +66,8 @@ class AdminStates(StatesGroup):
     REMOVE_TIME_AMOUNT = State()
     SEND_MESSAGE_TARGET = State()
 
+class PromoStates(StatesGroup):
+    waiting_for_code = State()
 
 def split_text(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list:
     """Разбивает текст на части указанной максимальной длины"""
@@ -81,11 +113,12 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     builder.button(text="📊 Статистика", callback_data="stats")
     builder.button(text="👥 Рефералы", callback_data="ref_program")
     builder.button(text="ℹ️ Помощь", callback_data="help")
+    builder.button(text="🎫 Активировать промокод", callback_data="activate_promo")
 
     if user.is_admin:
         builder.button(text="⚠️ Админ. меню", callback_data="admin_menu")
 
-    builder.adjust(2, 2, 1, 1)
+    builder.adjust(2, 2, 1, 1, 1)
 
     if message_id:
         # Редактируем существующее сообщение
@@ -203,6 +236,37 @@ async def referral_cmd(message: Message, bot: Bot):
     )
     await message.answer(text, parse_mode="Markdown")
 
+@router.callback_query(F.data == "admin_promo_stats")
+async def admin_promo_stats_list(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    await callback.answer()
+    promos = await get_all_promocodes_with_stats()
+    if not promos:
+        text = "📭 Промокоды ещё не созданы."
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="admin_menu")
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        return
+
+    # Формируем сообщение со списком промокодов
+    text = "**📊 Статистика промокодов:**\n\n"
+    builder = InlineKeyboardBuilder()
+    for item in promos:
+        promo = item["promo"]
+        uses_count = len(item["uses"])
+        status = "✅ Активен" if promo.is_active else "❌ Неактивен"
+        # Краткая строка
+        text += f"• `{promo.code}` — {uses_count}/{promo.max_uses}, {status}\n"
+        # Добавляем кнопку для детального просмотра этого промокода
+        builder.button(text=f"🔍 {promo.code}", callback_data=f"promo_detail_{promo.id}")
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    builder.adjust(1)  # по одной кнопке в ряд
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 @router.callback_query(F.data == "ref_program")
 async def referral_program_callback(callback: CallbackQuery, bot: Bot):
@@ -232,6 +296,56 @@ async def referral_program_callback(callback: CallbackQuery, bot: Bot):
     )
     await callback.message.answer(text, parse_mode="Markdown")
 
+@router.callback_query(F.data.startswith("promo_detail_"))
+async def admin_promo_detail(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+
+    promo_id = int(callback.data.split("_")[2])
+    promos = await get_all_promocodes_with_stats()
+    promo_item = next((p for p in promos if p["promo"].id == promo_id), None)
+    if not promo_item:
+        await callback.answer("❌ Промокод не найден")
+        return
+
+    promo = promo_item["promo"]
+    uses = promo_item["uses"]
+
+    status = "✅ Активен" if promo.is_active else "❌ Неактивен"
+    expires = promo.expires_at.strftime("%d.%m.%Y") if promo.expires_at else "никогда"
+
+    # Формируем текст в HTML
+    text = (
+        f"<b>📊 Промокод:</b> <code>{promo.code}</code>\n"
+        f"• Месяцев: {promo.months}\n"
+        f"• Тип: {'одноразовый' if promo.max_uses == 1 else 'многоразовый'}\n"
+        f"• Использовано: {promo.current_uses}/{promo.max_uses}\n"
+        f"• Статус: {status}\n"
+        f"• Создан: {promo.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"• Истекает: {expires}\n\n"
+        f"<b>👤 Активации:</b>"
+    )
+
+    if uses:
+        for use in uses:
+            user_name = html.escape(use['full_name']) if use['full_name'] else "—"
+            username = use['username']
+            if username:
+                user_link = f"@{username}"
+            else:
+                user_link = user_name
+            text += f"\n• {user_link} (<code>{use['telegram_id']}</code>) — {use['used_at'].strftime('%d.%m.%Y %H:%M')}"
+    else:
+        text += "\n• Пока не активирован"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад к списку", callback_data="admin_promo_stats")
+    builder.button(text="⬅️ В админ-меню", callback_data="admin_menu")
+    builder.adjust(1)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 @router.message(Command("menu"))
 async def menu_cmd(message: Message, bot: Bot):
@@ -258,6 +372,48 @@ async def menu_cmd(message: Message, bot: Bot):
 
     await show_menu(bot, message.from_user.id)
 
+@router.callback_query(F.data == "activate_promo")
+async def activate_promo_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    # Создаём клавиатуру с кнопкой отмены
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_promo")]]
+    )
+    await callback.message.answer("🔑 Введите промокод:", reply_markup=cancel_kb)
+    await state.set_state(PromoStates.waiting_for_code)
+
+@router.message(PromoStates.waiting_for_code)
+async def process_promo_code(message: Message, state: FSMContext, bot: Bot):
+    code = message.text.strip()
+    if not code:
+        await message.answer("❌ Промокод не может быть пустым. Попробуйте ещё раз или нажмите Отмена.")
+        return
+
+    success, msg = await activate_promo_code(message.from_user.id, code)
+    await message.answer(msg)
+
+    # Если активация успешна, можно обновить меню
+    if success:
+        # Показываем главное меню (опционально)
+        await show_menu(bot, message.from_user.id)
+    else:
+        # Если ошибка, предлагаем попробовать ещё раз
+        cancel_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_promo")]]
+        )
+        await message.answer("Вы можете ввести другой код или отменить ввод.", reply_markup=cancel_kb)
+        # Не завершаем состояние, чтобы можно было ввести код повторно
+        return
+
+    await state.finish()
+
+@router.callback_query(F.data == "cancel_promo", StateFilter(PromoStates.waiting_for_code))
+async def cancel_promo_input(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer()
+    await callback.message.edit_text("⛔ Ввод промокода отменён.")
+    await state.finish()
+    # Возвращаем главное меню
+    await show_menu(bot, callback.from_user.id, callback.message.message_id)    
 
 @router.callback_query(F.data == "help")
 async def help_msg(callback: CallbackQuery):
@@ -266,10 +422,9 @@ async def help_msg(callback: CallbackQuery):
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     text = (
         f"О боте:\n"
-        "<b>Разработчики:</b>\n"
-        "@QueenDekim | @cpn_moris\n"
-        "<i>Отдельное спасибо</i> @ascento <i>за помощь в разработке</i>\n"
-        "<a href='https://t.me/+OJsul9nc9hYzZjEy'>Официальный чат проекта</a>"
+        "<b>Разработчик:</b>\n"
+        "@Vanusha_in\n"
+        "<i>Обращайтесь если вы хотите настроить собственный vpn или у вас возникла проблема</i>\n"
     )
     await callback.message.answer(text, parse_mode='HTML', reply_markup=builder.as_markup())
 
@@ -287,7 +442,6 @@ async def renew_subscription(callback: CallbackQuery):
         builder.button(text=button_text, callback_data=f"pay_star_{months}")
 
     # Отдельная кнопка с оплатой через Crypto Bot (USDT/крипта)
-    builder.button(text="💳 Crypto Bot (USDT)", callback_data="crypto_payment")
 
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(1)
@@ -390,6 +544,16 @@ async def process_successful_payment(message: Message, bot: Bot):
                             if db_user:
                                 db_user.vless_profile_data = json.dumps(profile_data)
                                 session.commit()
+                        # --- Сохраняем IP и применяем ограничение скорости ---
+                        client_ip = profile_data.get("client_ip")
+                        if client_ip:
+                            with Session() as session:
+                                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                                if db_user and not db_user.client_ip:
+                                    db_user.client_ip = client_ip
+                                    session.commit()
+                            await apply_tc_limit(client_ip)
+                        # -------------------------------------------------------
                 else:
                     profile_data = safe_json_loads(user.vless_profile_data)
 
@@ -417,9 +581,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 if profile_data:
                     vless_url = generate_vless_url(profile_data)
 
-                    # Создаём Happ limited link (лимит устройств можно задать,
-                    # например, 3)
-                    # или брать из тарифа
+                    # Создаём Happ limited link (лимит устройств можно задать, например, 3)
                     install_code = await create_happ_limited_link(3)
                     if install_code:
                         # Сохраняем install_code в БД
@@ -429,10 +591,8 @@ async def process_successful_payment(message: Message, bot: Bot):
                             if db_user:
                                 db_user.happ_install_code = install_code
                                 session.commit()
-                        # Формируем URL для Happ (предполагаем, что
-                        # subscription_token уже есть или создаём)
+                        # Формируем URL для Happ (предполагаем, что subscription_token уже есть или создаём)
                         if not user.subscription_token:
-                            # Создаём токен, если его нет
                             token = str(uuid.uuid4())
                             with Session() as session:
                                 db_user = session.query(User).filter_by(
@@ -441,8 +601,6 @@ async def process_successful_payment(message: Message, bot: Bot):
                                     db_user.subscription_token = token
                                     session.commit()
                         token = user.subscription_token or (await get_user(user.telegram_id)).subscription_token
-                        # Здесь нужно указать ваш домен и порт, где висит сервер подписок (например, тот же, что и бот, или отдельный)
-                        # Порт указан в логах как 8000, можно добавить в config
                         base_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{token}"
                         happ_url = f"{base_url}#Happ?installid={install_code}"
                     else:
@@ -478,7 +636,6 @@ async def process_successful_payment(message: Message, bot: Bot):
         logger.error(f"🛑 Successful payment processing error: {e}")
         await message.answer("❌ Ошибка при обработке платежа")
 
-
 @router.callback_query(F.data == "admin_menu")
 async def admin_menu(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
@@ -506,7 +663,9 @@ async def admin_menu(callback: CallbackQuery):
         callback_data="admin_network_stats")
     builder.button(text="📢 Рассылка", callback_data="admin_send_message")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
-    builder.adjust(2, 1, 1, 1, 1)
+    builder.button(text="🎫 Создать промокод", callback_data="admin_create_promo")
+    builder.button(text="📊 Статистика промокодов", callback_data="admin_promo_stats")
+    builder.adjust(2, 1, 1, 1, 1, 1, 1)
 
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='Markdown')
 
@@ -656,7 +815,17 @@ async def admin_remove_time_amount(message: Message, state: FSMContext):
         await state.clear()
 
 # Обработчики для вывода списка пользователей
+@router.message(Command("use"))
+async def use_promo_cmd(message: Message):
+    """Активировать промокод. Формат: /use <код>"""
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Использование: /use <код>")
+        return
 
+    code = args[1].strip()
+    success, msg = await activate_promo_code(message.from_user.id, code)
+    await message.answer(msg)
 
 @router.callback_query(F.data == "admin_user_list")
 async def admin_user_list(callback: CallbackQuery):
@@ -721,8 +890,45 @@ async def handle_user_list_inactive(callback: CallbackQuery):
     # Отправляем оставшуюся часть текста
     await callback.message.answer(text, parse_mode="HTML")
 
-# Обработчики для рассылки сообщений
+@router.callback_query(AdminPromoStates.choosing_type, F.data.in_({"promo_type_single", "promo_type_multi"}))
+async def admin_promo_choose_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    promo_type = "single" if callback.data == "promo_type_single" else "multi"
+    await state.update_data(promo_type=promo_type)
+    
+    # Спрашиваем количество месяцев
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    await callback.message.edit_text(
+        "🗓 Введите количество месяцев (от 1 до 12):",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(AdminPromoStates.entering_months)
 
+@router.message(Command("listpromo"))
+async def list_promo_cmd(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await message.answer("⛔ Доступ запрещён")
+        return
+
+    promos = await list_promocodes()
+    if not promos:
+        await message.answer("📭 Промокодов пока нет")
+        return
+
+    text = "**📋 Список промокодов:**\n\n"
+    for p in promos:
+        status = "✅ Активен" if p.is_active else "❌ Неактивен"
+        expires = f", истекает {p.expires_at.strftime('%d.%m.%Y')}" if p.expires_at else ""
+        text += (
+            f"`{p.code}` — {p.months} мес., "
+            f"использовано {p.current_uses}/{p.max_uses}, {status}{expires}\n"
+        )
+    # Разбиваем на части, если слишком длинно
+    parts = split_text(text, MAX_MESSAGE_LENGTH)
+    for part in parts:
+        await message.answer(part, parse_mode="Markdown")
 
 @router.callback_query(F.data == "admin_send_message")
 async def admin_send_message_start(callback: CallbackQuery, state: FSMContext):
@@ -749,6 +955,27 @@ async def admin_send_message_target(
     await callback.message.answer("Введите сообщение для рассылки:")
     await state.set_state(AdminStates.SEND_MESSAGE)
 
+@router.callback_query(F.data == "admin_create_promo")
+async def admin_create_promo_start(callback: CallbackQuery, state: FSMContext):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    await callback.answer()
+    
+    # Клавиатура выбора типа промокода
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔹 Одноразовый", callback_data="promo_type_single")
+    builder.button(text="🔸 Многоразовый", callback_data="promo_type_multi")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        "🎫 **Создание промокода**\n\nВыберите тип промокода:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminPromoStates.choosing_type)
 
 @router.message(AdminStates.SEND_MESSAGE)
 async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
@@ -785,7 +1012,49 @@ async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
 # Остальные обработчики остаются без изменений
+@router.message(Command("addpromo"))
+async def add_promo_cmd(message: Message):
+    """Добавить промокод. Формат: /addpromo <месяцы> <макс_использований> [код]"""
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await message.answer("⛔ Доступ запрещён")
+        return
 
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("Использование: /addpromo <месяцы> <макс_использований> [код]")
+        return
+
+    try:
+        months = int(args[1])
+        max_uses = int(args[2])
+    except ValueError:
+        await message.answer("❌ Месяцы и макс. использования должны быть числами")
+        return
+
+    if not (1 <= months <= 12):
+        await message.answer("❌ Месяцы должны быть от 1 до 12")
+        return
+    if max_uses < 1:
+        await message.answer("❌ Макс. использования должно быть >= 1")
+        return
+
+    code = args[3] if len(args) >= 4 else None
+
+    try:
+        promo = await create_promo_code(months, max_uses, code)
+        await message.answer(
+            f"✅ Промокод создан!\n"
+            f"Код: `{promo.code}`\n"
+            f"Месяцев: {promo.months}\n"
+            f"Использований: {promo.current_uses}/{promo.max_uses}",
+            parse_mode="Markdown"
+        )
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка: {e}")
+    except Exception as e:
+        logger.error(f"Error creating promo: {e}")
+        await message.answer("❌ Внутренняя ошибка")
 
 @router.callback_query(F.data == "static_profiles_menu")
 async def static_profiles_menu(callback: CallbackQuery):
@@ -799,6 +1068,43 @@ async def static_profiles_menu(callback: CallbackQuery):
     builder.adjust(1)
     await callback.message.edit_text("**Выберите действие**", reply_markup=builder.as_markup(), parse_mode='Markdown')
 
+@router.message(AdminPromoStates.entering_months)
+async def admin_promo_enter_months(message: Message, state: FSMContext):
+    try:
+        months = int(message.text.strip())
+        if not (1 <= months <= 12):
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число от 1 до 12.")
+        return
+    
+    await state.update_data(months=months)
+    data = await state.get_data()
+    
+    # Если тип "single", переходим к вводу кода (или генерации)
+    if data["promo_type"] == "single":
+        # Для одноразового max_uses = 1
+        await state.update_data(max_uses=1)
+        # Спрашиваем, ввести свой код или сгенерировать
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔄 Сгенерировать автоматически", callback_data="promo_auto_code")
+        builder.button(text="✏️ Ввести свой код", callback_data="promo_custom_code")
+        builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+        builder.adjust(1)
+        await message.answer(
+            "🔑 Выберите способ создания кода:",
+            reply_markup=builder.as_markup()
+        )
+        await state.set_state(AdminPromoStates.entering_custom_code)
+    else:  # многоразовый
+        # Спрашиваем максимальное количество использований
+        builder = InlineKeyboardBuilder()
+        builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+        await message.answer(
+            "🔢 Введите максимальное количество использований (целое число больше 1):",
+            reply_markup=builder.as_markup()
+        )
+        await state.set_state(AdminPromoStates.entering_max_uses)
 
 @router.callback_query(F.data == "static_profile_add")
 async def static_profile_add(callback: CallbackQuery, state: FSMContext):
@@ -872,6 +1178,29 @@ async def handle_delete_static_profile(callback: CallbackQuery):
         logger.error(f"🛑 Ошибка при удалении статического профиля: {e}")
         await callback.answer("⚠️ Ошибка при удалении профиля")
 
+@router.message(AdminPromoStates.entering_max_uses)
+async def admin_promo_enter_max_uses(message: Message, state: FSMContext):
+    try:
+        max_uses = int(message.text.strip())
+        if max_uses < 2:  # для многоразовых минимум 2
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите целое число больше 1.")
+        return
+    
+    await state.update_data(max_uses=max_uses)
+    
+    # Далее выбор способа генерации кода
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Сгенерировать автоматически", callback_data="promo_auto_code")
+    builder.button(text="✏️ Ввести свой код", callback_data="promo_custom_code")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+    await message.answer(
+        "🔑 Выберите способ создания кода:",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(AdminPromoStates.entering_custom_code)
 
 @router.callback_query(F.data == "connect")
 async def connect_profile(callback: CallbackQuery):
@@ -986,6 +1315,40 @@ async def connect_profile(callback: CallbackQuery):
 
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='Markdown')
 
+@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_auto_code")
+async def admin_promo_auto_code(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    # Автоматическая генерация: код не передаём, функция create_promo_code сама сгенерирует
+    await state.update_data(custom_code=None)
+    await show_promo_confirmation(callback.message, state)
+
+@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_custom_code")
+async def admin_promo_custom_code_prompt(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    await callback.message.edit_text(
+        "✏️ Введите желаемый код (только буквы и цифры, без пробелов):",
+        reply_markup=builder.as_markup()
+    )
+    # Оставляем состояние, но следующий шаг будет message
+
+@router.message(AdminPromoStates.entering_custom_code)
+async def admin_promo_enter_custom_code(message: Message, state: FSMContext):
+    code = message.text.strip()
+    # Простейшая валидация (буквы и цифры)
+    if not code or not code.isalnum():
+        await message.answer("❌ Код может содержать только буквы и цифры. Попробуйте ещё раз.")
+        return
+    
+    # Проверяем, не существует ли уже такой код
+    existing = await get_promo_by_code(code)
+    if existing:
+        await message.answer("❌ Такой код уже существует. Введите другой код или используйте автогенерацию.")
+        return
+    
+    await state.update_data(custom_code=code)
+    await show_promo_confirmation(message, state)
 
 @router.callback_query(F.data == "stats")
 async def user_stats(callback: CallbackQuery):
@@ -1016,6 +1379,32 @@ async def user_stats(callback: CallbackQuery):
     )
     await callback.message.answer(text, parse_mode='Markdown')
 
+async def show_promo_confirmation(target, state: FSMContext):
+    """Показывает сводку и запрашивает подтверждение"""
+    data = await state.get_data()
+    promo_type = "одноразовый" if data["promo_type"] == "single" else "многоразовый"
+    code_desc = data.get("custom_code") or "(будет сгенерирован автоматически)"
+    
+    text = (
+        f"📋 **Параметры промокода:**\n"
+        f"• Тип: {promo_type}\n"
+        f"• Месяцев: {data['months']}\n"
+        f"• Макс. использований: {data['max_uses']}\n"
+        f"• Код: `{code_desc}`\n\n"
+        f"Подтверждаете создание?"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, создать", callback_data="admin_promo_confirm")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+    
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    else:
+        await target.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    
+    await state.set_state(AdminPromoStates.confirming)
 
 @router.callback_query(F.data == "admin_network_stats")
 async def network_stats(callback: CallbackQuery):
@@ -1038,12 +1427,43 @@ async def network_stats(callback: CallbackQuery):
     )
     await callback.message.edit_text(text, parse_mode='Markdown')
 
+@router.callback_query(AdminPromoStates.confirming, F.data == "admin_promo_confirm")
+async def admin_promo_confirm(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    
+    try:
+        promo = await create_promo_code(
+            months=data['months'],
+            max_uses=data['max_uses'],
+            code=data.get('custom_code')
+        )
+        await callback.message.edit_text(
+            f"✅ **Промокод успешно создан!**\n\n"
+            f"Код: `{promo.code}`\n"
+            f"Месяцев: {promo.months}\n"
+            f"Тип: {'одноразовый' if promo.max_uses == 1 else 'многоразовый'}\n"
+            f"Использований: {promo.current_uses}/{promo.max_uses}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка создания промокода: {e}")
+        await callback.message.edit_text("❌ Произошла ошибка при создании промокода.")
+    finally:
+        await state.finish()
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     await show_menu(bot, callback.from_user.id, callback.message.message_id)
 
+@router.callback_query(F.data == "admin_promo_cancel")
+async def admin_promo_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.finish()
+    await callback.message.edit_text("⛔ Создание промокода отменено.")
+    # Возвращаем админ-меню (опционально)
+    await show_menu(callback.bot, callback.from_user.id, callback.message.message_id)
 
 def setup_handlers(dp: Dispatcher):
     dp.include_router(router)
