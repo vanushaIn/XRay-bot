@@ -128,7 +128,7 @@ class XUIAPI:
             logger.exception(f"🛑 Update inbound error: {e}")
             return False
 
-    async def create_vless_profile(self, telegram_id: int, subscription_days: int = 0):
+    async def create_vless_profile(self, telegram_id: int, subscription_days: int = 0, client_ip: str = None):
         """Создание нового клиента для пользователя (expiryTime всегда 0)"""
         if not await self.login():
             logger.error("🛑 Login failed before creating profile")
@@ -166,7 +166,7 @@ class XUIAPI:
                 "publicKey": config.REALITY_PUBLIC_KEY,
                 "shortId": config.REALITY_SHORT_ID,
                 "spiderX": config.REALITY_SPIDER_X,
-                "ip": client_ip  # <-- обязательно добавить это поле
+                "ip": client_ip  # обязательно для 3X-UI
             }
 
             clients.append(new_client)
