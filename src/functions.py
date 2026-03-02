@@ -145,16 +145,19 @@ class XUIAPI:
 
             client_id = str(uuid.uuid4())
             email = f"user_{telegram_id}"
+
+            # Генерация IP, если не передан
             if client_ip is None:
                 last_octet = (telegram_id % 253) + 2
                 client_ip = f"10.0.0.{last_octet}"
+
             new_client = {
                 "id": client_id,
                 "flow": "",
                 "email": email,
                 "limitIp": 5,
                 "totalGB": 0,
-                "expiryTime": 0,          # всегда 0
+                "expiryTime": 0,
                 "enable": True,
                 "tgId": f"{telegram_id}",
                 "subId": "",
@@ -162,7 +165,8 @@ class XUIAPI:
                 "fingerprint": config.REALITY_FINGERPRINT,
                 "publicKey": config.REALITY_PUBLIC_KEY,
                 "shortId": config.REALITY_SHORT_ID,
-                "spiderX": config.REALITY_SPIDER_X
+                "spiderX": config.REALITY_SPIDER_X,
+                "ip": client_ip  # <-- обязательно добавить это поле
             }
 
             clients.append(new_client)
@@ -195,7 +199,7 @@ class XUIAPI:
                     "fp": config.REALITY_FINGERPRINT,
                     "sid": config.REALITY_SHORT_ID,
                     "spx": config.REALITY_SPIDER_X,
-                    "client_ip": client_ip   # <-- добавьте эту строку
+                    "client_ip": client_ip
                 }
             return None
         except Exception as e:
