@@ -1,23 +1,45 @@
-from fastapi import Request, HTTPException, Depends
-from tg_auth import TgAuth
+import hashlib
+import hmac
+import json
+from urllib.parse import parse_qsl
+from fastapi import HTTPException, Request
 import os
 
-# Токен вашего бота (храните в .env)
+# Токен бота должен быть задан в переменной окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-tgauth = TgAuth(token=BOT_TOKEN)
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable not set")
 
-async def get_current_user(request: Request):
+async def verify_telegram_init_data(request: Request) -> dict:
     """
-    Проверяет заголовок Authorization: tma <initData>
-    Возвращает данные пользователя из initData.
+    Проверяет подпись initData из заголовка Authorization.
+    Возвращает данные пользователя при успехе.
     """
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("tma "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    
+
     init_data = auth_header[4:]  # убираем "tma "
-    try:
-        user_data = tgauth.parse(init_data)
-        return user_data
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Invalid initData: {e}")
+    parsed = dict(parse_qsl(init_data))
+    received_hash = parsed.pop('hash', None)
+    if not received_hash:
+        raise HTTPException(status_code=401, detail="Missing hash in initData")
+
+    # Сортируем ключи и создаём строку
+    items = sorted(parsed.items())
+    data_check_string = "\n".join(f"{k}={v}" for k, v in items)
+
+    # Вычисляем секретный ключ из токена бота
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+
+    # Вычисляем хеш от data_check_string
+    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    if computed_hash != received_hash:
+        raise HTTPException(status_code=401, detail="Invalid hash")
+
+    # Парсим поле user (оно в JSON)
+    user_str = parsed.get('user')
+    if user_str:
+        parsed['user'] = json.loads(user_str)
+    return parsed
