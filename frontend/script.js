@@ -43,24 +43,24 @@ function updateUI() {
 }
 
 // Получение статуса с сервера
-async function fetchStatus() {
-    try {
-        const response = await fetch(`${API_BASE}/api/user/status`, {
-            headers: {
-                'Authorization': `tma ${initData}`
-            }
-        });
-        if (response.ok) {
-            const data = await response.json();
-            userStatus = { ...userStatus, ...data };
-            updateUI();
-        } else {
-            console.error('Failed to fetch status');
-        }
-    } catch (error) {
-        console.error('Error fetching status:', error);
-    }
-}
+// async function fetchStatus() {
+//     try {
+//         const response = await fetch(`${API_BASE}/api/user/status`, {
+//             headers: {
+//                 'Authorization': `tma ${initData}`
+//             }
+//         });
+//         if (response.ok) {
+//             const data = await response.json();
+//             userStatus = { ...userStatus, ...data };
+//             updateUI();
+//         } else {
+//             console.error('Failed to fetch status');
+//         }
+//     } catch (error) {
+//         console.error('Error fetching status:', error);
+//     }
+// }
 
 // Тест download
 async function testDownload() {
