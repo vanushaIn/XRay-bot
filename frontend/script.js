@@ -6,7 +6,7 @@ tg.expand();
 const initData = tg.initData;
 
 // URL вашего бэкенда (замените на реальный)
-const API_BASE = 'https://ваш-домен.com'; // например, https://ваш-домен.ru
+const API_BASE = ''; // например, https://ваш-домен.ru
 
 // Элементы DOM
 const statusIcon = document.getElementById('status-icon');
