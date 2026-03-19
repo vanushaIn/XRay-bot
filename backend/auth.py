@@ -4,7 +4,11 @@ import json
 from urllib.parse import parse_qsl
 from fastapi import HTTPException, Request
 import os
+import logging
+import sys
 
+logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
+logger = logging.getLogger(__name__)
 # Токен бота должен быть задан в переменной окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -37,6 +41,12 @@ async def verify_telegram_init_data(request: Request) -> dict:
 
     if computed_hash != received_hash:
         raise HTTPException(status_code=401, detail="Invalid hash")
+    # внутри функции verify_telegram_init_data после получения hash:
+    logger.debug(f"Received hash: {received_hash}")
+    logger.debug(f"Data check string: {data_check_string}")
+    logger.debug(f"Computed hash: {computed_hash}")
+    if computed_hash != received_hash:
+        logger.error(f"Hash mismatch! Expected {computed_hash}, got {received_hash}")
 
     # Парсим поле user (оно в JSON)
     user_str = parsed.get('user')
