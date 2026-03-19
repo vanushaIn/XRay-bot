@@ -9,7 +9,7 @@ DOWNLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 CHUNK_SIZE = 1024 * 1024          # 1 MB
 
 @router.get("/download")
-async def download_test(request: Request, user_data: dict = Depends(verify_telegram_init_data)):
+async def download_test(request: Request):
     async def generate():
         remaining = DOWNLOAD_SIZE
         while remaining > 0:
