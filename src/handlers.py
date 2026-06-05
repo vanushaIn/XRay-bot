@@ -507,11 +507,41 @@ async def process_pre_checkout_query(
         bot: Bot):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
+@router.message(Command("fix_subids"))
+async def fix_subids(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await message.answer("⛔ Доступ запрещён")
+        return
+    await message.answer("🔄 Начинаю обновление subId для всех пользователей...")
+    with Session() as session:
+        users = session.query(User).all()
+        api = XUIAPI()
+        try:
+            await api.login()
+            for u in users:
+                if u.vless_profile_data:
+                    profile = json.loads(u.vless_profile_data)
+                    email = profile.get("email")
+                    if email and not u.subscription_token:
+                        new_subid = secrets.token_hex(16)
+                        # Обновляем в панели
+                        if await api.update_client_subid(email, new_subid):
+                            u.subscription_token = new_subid
+                            # Обновляем profile_data
+                            profile["subId"] = new_subid
+                            u.vless_profile_data = json.dumps(profile)
+                            session.commit()
+                            await message.answer(f"✅ {email} -> {new_subid}")
+                        else:
+                            await message.answer(f"❌ Ошибка обновления {email}")
+        finally:
+            await api.close()
+    await message.answer("✅ Готово!")
 
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, bot: Bot):
     try:
-        # Извлекаем информацию из payload
         payload = message.successful_payment.invoice_payload
         user = await get_user(message.from_user.id)
         if not user:
@@ -519,31 +549,29 @@ async def process_successful_payment(message: Message, bot: Bot):
             return
 
         now = datetime.utcnow()
-        action_type = "продлена" if (
-            user.subscription_end and user.subscription_end > now) else "куплена"
+        action_type = "продлена" if (user.subscription_end and user.subscription_end > now) else "куплена"
 
-        # --- Обновляем подписку в БД (уже есть) ---
         if payload.startswith("stars_"):
             months = int(payload.split("_")[1])
             stars_price = config.calculate_stars_price(months)
-
             success = await update_subscription(message.from_user.id, months)
-            suffix = "месяц" if months == 1 else "месяца" if months in (
-                2, 3, 4) else "месяцев"
+            suffix = "месяц" if months == 1 else "месяца" if months in (2, 3, 4) else "месяцев"
 
             if success:
-                # --- Создаём VPN-профиль, если его ещё нет ---
                 profile_data = None
+                # Создаём профиль, если его нет
                 if not user.vless_profile_data:
-                    days = months * 30  # если месяц = 30 дней
+                    days = months * 30
                     profile_data = await create_vless_profile(user.telegram_id, subscription_days=days)
                     if profile_data:
                         with Session() as session:
                             db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
                             if db_user:
                                 db_user.vless_profile_data = json.dumps(profile_data)
+                                # Сохраняем subId как subscription_token
+                                db_user.subscription_token = profile_data.get("subId")
                                 session.commit()
-                        # --- Сохраняем IP и применяем ограничение скорости ---
+                        # Применяем ограничение скорости по IP
                         client_ip = profile_data.get("client_ip")
                         if client_ip:
                             with Session() as session:
@@ -552,17 +580,14 @@ async def process_successful_payment(message: Message, bot: Bot):
                                     db_user.client_ip = client_ip
                                     session.commit()
                             await apply_tc_limit(client_ip)
-                        # -------------------------------------------------------
                 else:
                     profile_data = safe_json_loads(user.vless_profile_data)
 
-                # Если профиль уже существовал, проверяем, отключён ли он, и включаем
+                # Включаем клиента, если он был отключён
                 if profile_data and profile_data.get("email"):
                     email = profile_data["email"]
-                    # Получаем свежего пользователя с обновлённой датой (на всякий случай)
                     updated_user = await get_user(message.from_user.id)
                     if updated_user and not updated_user.is_enabled_in_panel:
-                        # Включаем клиента через вспомогательную функцию
                         enable_success = await enable_client_by_email(email)
                         if enable_success:
                             with Session() as session:
@@ -574,61 +599,57 @@ async def process_successful_payment(message: Message, bot: Bot):
                         else:
                             logger.warning(f"⚠️ Failed to enable client {email} after payment")
 
-                # --- Далее формирование ссылок для пользователя (остаётся без изменений) ---
+                # Формируем ссылку на подписку (если есть subId)
                 vless_url = None
-                happ_url = None
+                subscription_link = None
                 if profile_data:
-                    vless_url = generate_vless_url(profile_data)
-
-                    # Создаём Happ limited link (лимит устройств можно задать, например, 3)
-                    install_code = await create_happ_limited_link(3)
-                    if install_code:
-                        # Сохраняем install_code в БД
-                        with Session() as session:
-                            db_user = session.query(User).filter_by(
-                                telegram_id=user.telegram_id).first()
-                            if db_user:
-                                db_user.happ_install_code = install_code
-                                session.commit()
-                        # Формируем URL для Happ (предполагаем, что subscription_token уже есть или создаём)
-                        if not user.subscription_token:
-                            token = str(uuid.uuid4())
-                            with Session() as session:
-                                db_user = session.query(User).filter_by(
-                                    telegram_id=user.telegram_id).first()
-                                if db_user:
-                                    db_user.subscription_token = token
-                                    session.commit()
-                        token = user.subscription_token or (await get_user(user.telegram_id)).subscription_token
-                        base_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{token}"
-                        happ_url = f"{base_url}#Happ?installid={install_code}"
+                    sub_id = profile_data.get("subId")
+                    # Если subId нет в profile_data, но есть в БД как subscription_token
+                    if not sub_id and user.subscription_token:
+                        sub_id = user.subscription_token
+                    if sub_id:
+                        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/sub/{sub_id}"
                     else:
-                        happ_url = "Не удалось создать ограниченную ссылку."
+                        # Если subId нет, генерируем статичную VLESS-ссылку
+                        vless_url = generate_vless_url(profile_data)
 
-                # --- Отправляем пользователю результат ---
+                # Текст ответа
                 answer_text = (
                     f"✅ Оплата звёздами прошла успешно! Ваша подписка {action_type} на {months} {suffix}.\n\n"
-                    "Спасибо за покупку! 🎉")
-                if vless_url:
-                    answer_text += f"\n\n📱 **VLESS ссылка для подключения:**\n`{vless_url}`"
-                if happ_url and "Не удалось" not in happ_url:
-                    answer_text += f"\n\n🔗 **Happ ссылка (лимит устройств 3):**\n`{happ_url}`"
-                elif happ_url:
-                    answer_text += f"\n\n⚠️ {happ_url}"
+                    "Спасибо за покупку! 🎉"
+                )
+
+                if subscription_link:
+                    answer_text += (
+                        f"\n\n🔗 **Ваша персональная ссылка для подписки:**\n"
+                        f"`{subscription_link}`\n\n"
+                        "ℹ️ **Инструкция:**\n"
+                        "1. Скопируйте ссылку.\n"
+                        "2. В приложении (V2RayNG, Nekobox, Hiddify) импортируйте её как подписку (Subscription).\n"
+                        "3. Приложение автоматически загрузит актуальную конфигурацию."
+                    )
+                elif vless_url:
+                    answer_text += (
+                        f"\n\n📱 **VLESS ссылка для подключения:**\n"
+                        f"`{vless_url}`\n\n"
+                        "ℹ️ Скопируйте ссылку и импортируйте в ваше VPN-приложение."
+                    )
+                else:
+                    answer_text += "\n\n⚠️ Не удалось сгенерировать ссылку для подключения. Обратитесь к администратору."
 
                 await message.answer(answer_text, parse_mode="Markdown")
 
-                # Уведомление администраторам (как было)
+                # Уведомление администраторам
                 admin_message = (
                     f"{action_type.capitalize()} подписка (звёзды) пользователем "
                     f"`{user.full_name}` | `{user.telegram_id}` "
-                    f"на {months} {suffix} - {stars_price}⭐")
+                    f"на {months} {suffix} - {stars_price}⭐"
+                )
                 for admin_id in config.ADMINS:
                     try:
                         await bot.send_message(admin_id, admin_message, parse_mode='Markdown')
                     except Exception as e:
-                        logger.error(
-                            f"🛑 Failed to send notification to admin {admin_id}: {e}")
+                        logger.error(f"🛑 Failed to send notification to admin {admin_id}: {e}")
             else:
                 await message.answer("❌ Ошибка при обновлении подписки")
     except Exception as e:
@@ -1237,7 +1258,18 @@ async def connect_profile(callback: CallbackQuery):
         return
 
     stats = await get_user_stats(profile_data['email'])
-    sub_id = stats.get('subId') if isinstance(stats, dict) else None
+    sub_id = stats.get('subId')
+    # Если sub_id нет, но в БД есть subscription_token – используем его
+    if not sub_id and user.subscription_token:
+        sub_id = user.subscription_token
+        # Обновляем в панели, чтобы в следующий раз было
+        api = XUIAPI()
+        try:
+            await api.login()
+            await api.update_client_subid(profile_data['email'], sub_id)
+        finally:
+            await api.close()
+
     if sub_id:
         subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/sub/{sub_id}"
     else:

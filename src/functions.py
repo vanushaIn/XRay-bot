@@ -250,6 +250,7 @@ class XUIAPI:
                     "fp": config.REALITY_FINGERPRINT,
                     "sid": config.REALITY_SHORT_ID,
                     "spx": config.REALITY_SPIDER_X,
+                    "subId": sub_id,
                     "client_ip": client_ip
                 }
             return None
@@ -377,30 +378,33 @@ class XUIAPI:
             return False
     
     async def get_user_stats(self, email: str):
-        """Получение статистики и subId по email"""
+        """Получение статистики и subId по email (с проверкой в settings)"""
         if not await self.login():
-            logger.error("🛑 Login failed before getting stats")
             return {"upload": 0, "download": 0, "subId": None}
-        
         try:
             url = f"{self.base_url}{self.api_prefix}/inbounds/getClientTraffics/{email}"
-            
             async with self.session.get(url) as resp:
                 if resp.status != 200:
                     return {"upload": 0, "download": 0, "subId": None}
-                
-                try:
-                    data = await resp.json()
-                    if data.get("success"):
-                        client_data = data.get("obj")
-                        if isinstance(client_data, dict):
-                            return {
-                                "upload": client_data.get("up", 0),
-                                "download": client_data.get("down", 0),
-                                "subId": client_data.get("subId")  # добавляем
-                            }
-                except:
-                    return {"upload": 0, "download": 0, "subId": None}
+                data = await resp.json()
+                if data.get("success"):
+                    client_data = data.get("obj")
+                    if isinstance(client_data, dict):
+                        sub_id = client_data.get("subId")
+                        # Если subId нет в статистике, пытаемся получить из настроек инбаунда
+                        if not sub_id:
+                            inbound = await self.get_inbound(config.INBOUND_ID)
+                            if inbound:
+                                settings = json.loads(inbound["settings"])
+                                for cl in settings.get("clients", []):
+                                    if cl.get("email") == email:
+                                        sub_id = cl.get("subId", "")
+                                        break
+                        return {
+                            "upload": client_data.get("up", 0),
+                            "download": client_data.get("down", 0),
+                            "subId": sub_id
+                        }
         except Exception as e:
             logger.error(f"🛑 Stats error: {e}")
         return {"upload": 0, "download": 0, "subId": None}
@@ -618,6 +622,43 @@ class XUIAPI:
         if self.session:
             await self.session.close()
 
+async def update_client_subid(self, email: str, new_subid: str) -> bool:
+    """Обновляет subId у клиента в inbound"""
+    if not await self.login():
+        return False
+    inbound = await self.get_inbound(config.INBOUND_ID)
+    if not inbound:
+        return False
+    try:
+        settings = json.loads(inbound["settings"])
+        clients = settings.get("clients", [])
+        updated = False
+        for client in clients:
+            if client.get("email") == email:
+                client["subId"] = new_subid
+                updated = True
+                break
+        if not updated:
+            return False
+        settings["clients"] = clients
+        update_data = {
+            "up": inbound["up"],
+            "down": inbound["down"],
+            "total": inbound["total"],
+            "remark": inbound["remark"],
+            "enable": inbound["enable"],
+            "expiryTime": inbound["expiryTime"],
+            "listen": inbound["listen"],
+            "port": inbound["port"],
+            "protocol": inbound["protocol"],
+            "settings": json.dumps(settings, indent=2),
+            "streamSettings": inbound["streamSettings"],
+            "sniffing": inbound["sniffing"],
+        }
+        return await self.update_inbound(config.INBOUND_ID, update_data)
+    except Exception as e:
+        logger.exception(f"🛑 update_client_subid error: {e}")
+        return False
 
 async def create_vless_profile(telegram_id: int, subscription_days: int = 0):
     api = XUIAPI()
