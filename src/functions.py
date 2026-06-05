@@ -515,6 +515,44 @@ class XUIAPI:
             logger.exception(f"🛑 update_client_expiry error: {e}")
             return False
 
+    async def update_client_subid(self, email: str, new_subid: str) -> bool:
+        """Обновляет subId у клиента в inbound"""
+        if not await self.login():
+            return False
+        inbound = await self.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            return False
+        try:
+            settings = json.loads(inbound["settings"])
+            clients = settings.get("clients", [])
+            updated = False
+            for client in clients:
+                if client.get("email") == email:
+                    client["subId"] = new_subid
+                    updated = True
+                    break
+            if not updated:
+                return False
+            settings["clients"] = clients
+            update_data = {
+                "up": inbound["up"],
+                "down": inbound["down"],
+                "total": inbound["total"],
+                "remark": inbound["remark"],
+                "enable": inbound["enable"],
+                "expiryTime": inbound["expiryTime"],
+                "listen": inbound["listen"],
+                "port": inbound["port"],
+                "protocol": inbound["protocol"],
+                "settings": json.dumps(settings, indent=2),
+                "streamSettings": inbound["streamSettings"],
+                "sniffing": inbound["sniffing"],
+            }
+            return await self.update_inbound(config.INBOUND_ID, update_data)
+        except Exception as e:
+            logger.exception(f"🛑 update_client_subid error: {e}")
+            return False
+
     async def disable_client_by_email(self, email: str) -> bool:
         """
         Отключает клиента по email (enable = false), не удаляя его.
