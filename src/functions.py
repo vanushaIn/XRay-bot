@@ -33,7 +33,7 @@ class XUIAPI:
             # Создаем новую сессию с общей куки-банкой
             self.session = aiohttp.ClientSession(
                 cookie_jar=self.cookie_jar,
-                trust_env=True  # Доверять переменным окружения для прокси
+                trust_env=True,  # Доверять переменным окружения для прокси
                 connector=aiohttp.TCPConnector(ssl=False)
             )   # <-- добавить
                 
