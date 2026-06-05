@@ -514,31 +514,44 @@ async def fix_subids(message: Message):
     if not user or not user.is_admin:
         await message.answer("⛔ Доступ запрещён")
         return
-    await message.answer("🔄 Начинаю обновление subId для всех пользователей...")
-    with Session() as session:
-        users = session.query(User).all()
-        api = XUIAPI()
-        try:
-            await api.login()
-            for u in users:
-                if u.vless_profile_data:
-                    profile = json.loads(u.vless_profile_data)
-                    email = profile.get("email")
-                    if email and not u.subscription_token:
-                        new_subid = secrets.token_hex(16)
-                        # Обновляем в панели
-                        if await api.update_client_subid(email, new_subid):
-                            u.subscription_token = new_subid
-                            # Обновляем profile_data
-                            profile["subId"] = new_subid
-                            u.vless_profile_data = json.dumps(profile)
+
+    await message.answer("🔄 Получаю список клиентов из панели...")
+    
+    async with XUIAPI() as api:
+        inbound = await api.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            await message.answer("❌ Не удалось получить данные inbound")
+            return
+        
+        settings = json.loads(inbound["settings"])
+        clients = settings.get("clients", [])
+        
+        updated = 0
+        for client in clients:
+            email = client.get("email")
+            sub_id = client.get("subId", "")
+            if not sub_id and email:
+                # Генерируем новый subId
+                new_subid = secrets.token_hex(16)
+                # Обновляем в панели
+                if await api.update_client_subid(email, new_subid):
+                    updated += 1
+                    # Если пользователь есть в БД, обновляем и там
+                    with Session() as session:
+                        db_user = session.query(User).filter_by(telegram_id=email.split('_')[-1] if email.startswith('user_') else None).first()
+                        # Или поиск по другим полям — упрощённо
+                        if db_user:
+                            db_user.subscription_token = new_subid
+                            if db_user.vless_profile_data:
+                                profile = json.loads(db_user.vless_profile_data)
+                                profile["subId"] = new_subid
+                                db_user.vless_profile_data = json.dumps(profile)
                             session.commit()
-                            await message.answer(f"✅ {email} -> {new_subid}")
-                        else:
-                            await message.answer(f"❌ Ошибка обновления {email}")
-        finally:
-            await api.close()
-    await message.answer("✅ Готово!")
+                    await message.answer(f"✅ Обновлён {email} -> {new_subid[:8]}...")
+                else:
+                    await message.answer(f"❌ Ошибка обновления {email}")
+        
+        await message.answer(f"✅ Готово! Обновлено {updated} клиентов.")
 
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, bot: Bot):
