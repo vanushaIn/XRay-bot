@@ -21,7 +21,7 @@ class Config(BaseModel):
     REALITY_SNI: str = os.getenv("REALITY_SNI", "example.com")
     REALITY_SHORT_ID: str = os.getenv("REALITY_SHORT_ID", "1234567890")
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
-
+    
     # Happ API
     HAPP_PROVIDER_CODE: str = os.getenv("HAPP_PROVIDER_CODE", "")
     HAPP_AUTH_KEY: str = os.getenv("HAPP_AUTH_KEY", "")

@@ -1,11 +1,22 @@
 import asyncio
-from aiogram.fsm.state import State, StatesGroup
-from promo import activate_promo_code
-import logging
 import json
 import html
-from functions import create_vless_profile, apply_tc_limit, safe_json_loads
-from functions import apply_tc_limit
+import logging
+import uuid
+import sqlite3   # <-- добавьте глобальный импорт
+from datetime import datetime, timedelta
+from aiogram import Dispatcher, Router, F, Bot
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup, InlineKeyboardButton
+from config import config
+from database import (
+    StaticProfile, get_user, create_user, update_subscription,
+    get_all_users, create_static_profile, get_static_profiles,
+    User, Session, get_user_stats as db_user_stats
+)
 from functions import (
     create_vless_profile,
     delete_client_by_email,
@@ -17,31 +28,19 @@ from functions import (
     disable_client_by_email,
     enable_client_by_email,
     create_happ_limited_link,
-    apply_tc_limit,        # <-- добавьте
-    remove_tc_limit         # <-- добавьте
+    apply_tc_limit,
+    remove_tc_limit,
+    safe_json_loads,
+    XUIAPI
 )
-import uuid
-from promo import get_all_promocodes_with_stats
-from aiogram.filters import StateFilter
-from promo import create_promo_code, activate_promo_code, list_promocodes
-from datetime import datetime, timedelta
-from aiogram import Dispatcher, Router, F, Bot
-from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup, InlineKeyboardButton
-from config import config
-from functions import XUIAPI
-from aiogram.fsm.state import State, StatesGroup
-from promo import create_promo_code, list_promocodes, get_promo_by_code  # возможно, вам понадобятся и другие функции
-from database import (
-    StaticProfile, get_user, create_user, update_subscription,
-    get_all_users, create_static_profile, get_static_profiles,
-    User, Session, get_user_stats as db_user_stats
+from promo import (
+    create_promo_code,
+    activate_promo_code,
+    get_all_promocodes_with_stats,
+    get_promo_by_code,
+    list_promocodes
 )
-from functions import create_vless_profile, delete_client_by_email, generate_vless_url, get_user_stats, create_static_client, get_global_stats, get_online_users, enable_client_by_email
-from functions import create_happ_limited_link
+
 logger = logging.getLogger(__name__)
 
 router = Router()
@@ -1216,8 +1215,7 @@ async def connect_profile(callback: CallbackQuery):
     # Гарантируем наличие токена подписки для Happ
     if not getattr(user, "subscription_token", None):
         with Session() as session:
-            db_user = session.query(User).filter_by(
-                telegram_id=user.telegram_id).first()
+            db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
             if db_user and not db_user.subscription_token:
                 db_user.subscription_token = str(uuid.uuid4())
                 session.commit()
@@ -1225,7 +1223,6 @@ async def connect_profile(callback: CallbackQuery):
 
     if not user.vless_profile_data:
         await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
-        # Вычисляем оставшиеся дни, если подписка активна
         remaining_days = 0
         if user.subscription_end and user.subscription_end > datetime.utcnow():
             delta = user.subscription_end - datetime.utcnow()
@@ -1234,8 +1231,7 @@ async def connect_profile(callback: CallbackQuery):
 
         if profile_data:
             with Session() as session:
-                db_user = session.query(User).filter_by(
-                    telegram_id=user.telegram_id).first()
+                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
                 if db_user:
                     db_user.vless_profile_data = json.dumps(profile_data)
                     session.commit()
@@ -1248,44 +1244,58 @@ async def connect_profile(callback: CallbackQuery):
     if not profile_data:
         await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
         return
-    vless_url = generate_vless_url(profile_data)
 
-    # --- Логика Happ с ограничением устройств ---
+    stats = await get_user_stats(profile_data['email'])
+    sub_id = stats.get('subId') if isinstance(stats, dict) else None
+    if sub_id:
+        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/sub/{sub_id}"
+    else:
+        subscription_link = None
+
+    # Если есть ссылка на подписку, используем её, иначе генерируем статичную VLESS
+    if subscription_link:
+        vless_url = subscription_link
+        text = (
+            "🎉 **Ваш VPN профиль готов!**\n\n"
+            "🔗 **Ваша персональная ссылка для подписки:**\n"
+            f"`{vless_url}`\n\n"
+            "ℹ️ **Инструкция по подключению:**\n"
+            "1. Скопируйте эту ссылку.\n"
+            "2. Откройте ваше VPN-приложение (V2RayNG, Nekobox, Hiddify, Happ).\n"
+            "3. Импортируйте ссылку как **подписку** (Subscription).\n"
+            "4. Приложение автоматически загрузит актуальную конфигурацию.\n\n"
+            "✅ Теперь при любых изменениях на сервере вам не нужно будет обновлять ссылку вручную."
+        )
+    else:
+        vless_url = generate_vless_url(profile_data)
+        text = (
+            "🎉 **Ваш VPN профиль готов!**\n\n"
+            "ℹ️ **Инструкция по подключению:**\n"
+            "1. Скачайте приложение для вашей платформы\n"
+            "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
+            f"`{vless_url}`\n\n"
+            "3. Активируйте соединение в приложении."
+        )
+
+    # --- Логика Happ с ограничением устройств (оставляем как есть) ---
     subscription_url = None
     if user.subscription_end and user.subscription_end > datetime.utcnow():
-        # Убедимся, что у пользователя есть install_code (если нет — создадим)
         if not user.happ_install_code:
-            # можно задать значение по умолчанию
             device_limit = getattr(user, 'device_limit', 3)
             install_code = await create_happ_limited_link(device_limit)
             if install_code:
                 with Session() as session:
-                    db_user = session.query(User).filter_by(
-                        telegram_id=user.telegram_id).first()
+                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
                     if db_user:
                         db_user.happ_install_code = install_code
                         session.commit()
-                # Обновляем объект user
                 user = await get_user(user.telegram_id)
 
-        # Если теперь есть install_code, формируем ссылку с installid
         if user.happ_install_code and user.subscription_token:
             base_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{user.subscription_token}"
             subscription_url = f"{base_url}#Happ?installid={user.happ_install_code}"
         elif user.subscription_token:
-            # Если install_code не удалось создать, даём обычную ссылку (без
-            # ограничений)
             subscription_url = f"http://{config.XUI_HOST}:{config.HAPP_PORT}/happ/{user.subscription_token}"
-
-    # Формируем текст сообщения
-    text = (
-        "🎉 **Ваш VPN профиль готов!**\n\n"
-        "ℹ️ **Инструкция по подключению:**\n"
-        "1. Скачайте приложение для вашей платформы\n"
-        "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
-        f"`{vless_url}`\n\n"
-        "3. Активируйте соединение в приложении."
-    )
 
     if subscription_url:
         text += (

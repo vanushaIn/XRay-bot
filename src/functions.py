@@ -7,6 +7,7 @@ import logging
 import random
 from config import config
 from urllib.parse import urljoin
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,9 @@ class XUIAPI:
         if base_path:
             self.base_url = f"{self.base_url}/{base_path}"
     
+    def generate_subscription_id() -> str:
+        """Генерирует уникальный ID для ссылки подписки клиента"""
+        return str(uuid.uuid4()).replace('-', '')[:16]
 
     async def login(self):
         """Аутентификация в 3x-UI API"""
@@ -106,6 +110,50 @@ class XUIAPI:
             logger.exception(f"🛑 Get inbound error: {e}")
             return None
 
+
+    async def get_inbound_settings(inbound_id: int = None):
+        """
+        Получает актуальные настройки inbound из панели 3X-UI.
+        Возвращает словарь с ключами: port, public_key, short_id, sni, spider_x, fingerprint.
+        """
+        if inbound_id is None:
+            inbound_id = config.INBOUND_ID
+        api = XUIAPI()
+        try:
+            inbound = await api.get_inbound(inbound_id)
+            if not inbound:
+                logger.error("Failed to get inbound settings")
+                return None
+            stream_settings = json.loads(inbound.get("streamSettings", "{}"))
+            reality = stream_settings.get("realitySettings", {})
+            # Извлекаем параметры
+            settings = {
+                "port": inbound.get("port"),
+                "public_key": reality.get("publicKey"),
+                "short_id": reality.get("shortIds", [""])[0] if reality.get("shortIds") else config.REALITY_SHORT_ID,
+                "sni": reality.get("serverNames", [""])[0] if reality.get("serverNames") else config.REALITY_SNI,
+                "spider_x": reality.get("spiderX", "/"),
+                "fingerprint": config.REALITY_FINGERPRINT  # обычно не меняется, можно оставить из конфига
+            }
+            return settings
+        except Exception as e:
+            logger.exception(f"Error getting inbound settings: {e}")
+            return None
+        finally:
+            await api.close()
+
+    def generate_vless_url(client_id: str, email: str, host: str, port: int, 
+                                    public_key: str, sni: str, short_id: str, fingerprint: str, spider_x: str) -> str:
+        """
+        Генерирует VLESS URL с переданными параметрами.
+        """
+        return (
+            f"vless://{client_id}@{host}:{port}"
+            f"?type=tcp&security=reality"
+            f"&pbk={public_key}&fp={fingerprint}&sni={sni}&sid={short_id}&spx={spider_x}"
+            f"#{email}"
+        )
+
     async def update_inbound(self, inbound_id: int, data: dict):
         """Обновление инбаунда"""
         try:
@@ -150,11 +198,12 @@ class XUIAPI:
             if client_ip is None:
                 last_octet = (telegram_id % 253) + 2
                 client_ip = f"10.0.0.{last_octet}"
-
+            sub_id = secrets.token_hex(16)  # 32 символа hex
             new_client = {
                 "id": client_id,
                 "flow": "",
                 "email": email,
+                "subId": sub_id,
                 "limitIp": 5,
                 "totalGB": 0,
                 "expiryTime": 0,
@@ -326,17 +375,17 @@ class XUIAPI:
             return False
     
     async def get_user_stats(self, email: str):
-        """Получение статистики по email"""
+        """Получение статистики и subId по email"""
         if not await self.login():
             logger.error("🛑 Login failed before getting stats")
-            return {"upload": 0, "download": 0}
+            return {"upload": 0, "download": 0, "subId": None}
         
         try:
             url = f"{self.base_url}{self.api_prefix}/inbounds/getClientTraffics/{email}"
             
             async with self.session.get(url) as resp:
                 if resp.status != 200:
-                    return {"upload": 0, "download": 0}
+                    return {"upload": 0, "download": 0, "subId": None}
                 
                 try:
                     data = await resp.json()
@@ -345,13 +394,14 @@ class XUIAPI:
                         if isinstance(client_data, dict):
                             return {
                                 "upload": client_data.get("up", 0),
-                                "download": client_data.get("down", 0)
+                                "download": client_data.get("down", 0),
+                                "subId": client_data.get("subId")  # добавляем
                             }
                 except:
-                    return {"upload": 0, "download": 0}
+                    return {"upload": 0, "download": 0, "subId": None}
         except Exception as e:
             logger.error(f"🛑 Stats error: {e}")
-        return {"upload": 0, "download": 0}
+        return {"upload": 0, "download": 0, "subId": None}
     
     async def get_global_stats(self, inbound_id: int):
         """Получение статистики инбаунда"""
@@ -647,7 +697,7 @@ async def get_user_stats(email: str):
     finally:
         await api.close()
 
-def generate_vless_url(profile_data: dict) -> str:
+def generate_vless_url1(profile_data: dict) -> str:
     remark = profile_data.get('remark', '')
     email = profile_data['email']
     fragment = f"{remark}-{email}" if remark else email
