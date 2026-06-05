@@ -617,31 +617,7 @@ class XUIAPI:
         """Закрывает сессию aiohttp"""
         if self.session:
             await self.session.close()
-async def create_happ_limited_link(install_limit: int) -> str | None:
-    """
-    Создаёт ограниченную ссылку через API Happ.
-    Возвращает install_code или None при ошибке.
-    """
-    url = config.HAPP_API_URL
-    params = {
-        "provider_code": config.HAPP_PROVIDER_CODE,
-        "auth_key": config.HAPP_AUTH_KEY,
-        "install_limit": install_limit
-    }
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-        try:
-            async with session.get(url, params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("rc") == 1:
-                        return data.get("install_code")
-                    else:
-                        logger.error(f"Happ API error: {data.get('msg')}")
-                else:
-                    logger.error(f"Happ API HTTP error: {resp.status}")
-        except Exception as e:
-            logger.exception(f"Happ API exception: {e}")
-    return None
+
 
 async def create_vless_profile(telegram_id: int, subscription_days: int = 0):
     api = XUIAPI()

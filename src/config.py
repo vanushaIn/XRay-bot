@@ -23,10 +23,7 @@ class Config(BaseModel):
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
     
     # Happ API
-    HAPP_PROVIDER_CODE: str = os.getenv("HAPP_PROVIDER_CODE", "")
-    HAPP_AUTH_KEY: str = os.getenv("HAPP_AUTH_KEY", "")
-    HAPP_API_URL: str = os.getenv("HAPP_API_URL", "https://api.happ-proxy.com/api/add-install")
-    HAPP_PORT: int = int(os.getenv("HAPP_PORT", "8000"))
+   
     
 
     # Настройки цен и скидок
