@@ -2,6 +2,7 @@ import asyncio
 import json
 import html
 import logging
+import secrets
 import uuid
 import sqlite3   # <-- добавьте глобальный импорт
 from datetime import datetime, timedelta
