@@ -713,6 +713,22 @@ def generate_vless_url1(profile_data: dict) -> str:
         f"#{fragment}"
     )
 
+def generate_vless_url(profile_data: dict) -> str:
+    remark = profile_data.get('remark', '')
+    email = profile_data['email']
+    fragment = f"{remark}-{email}" if remark else email
+    
+    return (
+        f"vless://{profile_data['client_id']}@{config.XUI_HOST}:{profile_data['port']}"
+        f"?type=tcp&security=reality"
+        f"&pbk={config.REALITY_PUBLIC_KEY}"
+        f"&fp={config.REALITY_FINGERPRINT}"
+        f"&sni={config.REALITY_SNI}"
+        f"&sid={config.REALITY_SHORT_ID}"
+        f"&spx={config.REALITY_SPIDER_X}"
+        f"#{fragment}"
+    )
+
 async def apply_tc_limit(ip: str):
     """Применяет ограничение скорости для IP через tc (30 Мбит/с)"""
     try:
