@@ -608,7 +608,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                     if not sub_id and user.subscription_token:
                         sub_id = user.subscription_token
                     if sub_id:
-                        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/sub/{sub_id}"
+                        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
                     else:
                         # Если subId нет, генерируем статичную VLESS-ссылку
                         vless_url = generate_vless_url(profile_data)
@@ -1271,7 +1271,7 @@ async def connect_profile(callback: CallbackQuery):
             await api.close()
 
     if sub_id:
-        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/sub/{sub_id}"
+        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
     else:
         subscription_link = None
 
