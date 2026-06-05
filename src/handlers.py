@@ -27,7 +27,6 @@ from functions import (
     get_online_users,
     disable_client_by_email,
     enable_client_by_email,
-    create_happ_limited_link,
     apply_tc_limit,
     remove_tc_limit,
     safe_json_loads,
@@ -40,6 +39,7 @@ from promo import (
     get_promo_by_code,
     list_promocodes
 )
+
 
 logger = logging.getLogger(__name__)
 
