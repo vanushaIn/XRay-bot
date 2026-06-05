@@ -34,7 +34,9 @@ class XUIAPI:
             self.session = aiohttp.ClientSession(
                 cookie_jar=self.cookie_jar,
                 trust_env=True  # Доверять переменным окружения для прокси
-            )
+                connector=aiohttp.TCPConnector(ssl=False)
+            )   # <-- добавить
+                
             
             auth_data = {
                 "username": config.XUI_USERNAME,
@@ -626,7 +628,7 @@ async def create_happ_limited_link(install_limit: int) -> str | None:
         "auth_key": config.HAPP_AUTH_KEY,
         "install_limit": install_limit
     }
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
         try:
             async with session.get(url, params=params) as resp:
                 if resp.status == 200:
