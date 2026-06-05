@@ -22,7 +22,14 @@ class XUIAPI:
         base_path = (config.XUI_BASE_PATH or '').strip('/')
         if base_path:
             self.base_url = f"{self.base_url}/{base_path}"
+            
+    async def __aenter__(self):
+        await self.login()
+        return self
     
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
     def generate_subscription_id() -> str:
         """Генерирует уникальный ID для ссылки подписки клиента"""
         return str(uuid.uuid4()).replace('-', '')[:16]
