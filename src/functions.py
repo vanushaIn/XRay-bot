@@ -204,12 +204,12 @@ class XUIAPI:
             client_data = {
                 "id": client_uuid,
                 "email": email,
-                "flow": "xtls-rprx-vision",
+                "flow": "",
                 "limitIp": 2,
                 "totalGB": total_gb,
                 "expiryTime": expiry_time,
                 "enable": True,
-                "tgId": "",
+                "tgId": "0",
                 "subId": client_uuid[:16]
             }
 
