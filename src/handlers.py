@@ -821,10 +821,9 @@ async def admin_menu(callback: CallbackQuery):
     builder.button(text="+ время", callback_data="admin_add_time")
     builder.button(text="- время", callback_data="admin_remove_time")
     builder.button(text="📋 Список пользователей", callback_data="admin_user_list")
+    builder.button(text="📋 Не подключившиеся", callback_data="admin_inactive_users_list")  # Новая кнопка
     builder.button(text="📊 Статистика исп. сети", callback_data="admin_network_stats")
     builder.button(text="📢 Рассылка", callback_data="admin_send_message")
-    # Новая кнопка
-    builder.button(text="🎁 Выдать неделю не подключившимся", callback_data="admin_give_week_inactive")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.button(text="🎫 Создать промокод", callback_data="admin_create_promo")
     builder.button(text="📊 Статистика промокодов", callback_data="admin_promo_stats")
@@ -1764,9 +1763,138 @@ async def admin_give_week_to_inactive(callback: CallbackQuery, bot: Bot):
         parse_mode='Markdown'
     )
 
-@router.callback_query(F.data == "admin_confirm_give_week")
-async def admin_confirm_give_week(callback: CallbackQuery, bot: Bot):
-    """Подтверждение выдачи недели подписки"""
+@router.callback_query(F.data == "admin_inactive_users_list")
+async def admin_inactive_users_list(callback: CallbackQuery):
+    """Показывает список пользователей, которые никогда не подключались"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+
+    await safe_answer_callback(callback)
+    
+    # Получаем всех пользователей
+    all_users = await get_all_users()
+    
+    # Фильтруем пользователей без профиля
+    inactive_users = []
+    for u in all_users:
+        has_profile = u.vless_profile_data is not None and u.vless_profile_data != ""
+        if not has_profile:
+            inactive_users.append(u)
+    
+    if not inactive_users:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="admin_menu")
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="✅ Все пользователи уже подключались к VPN!",
+            reply_markup=builder.as_markup()
+        )
+        return
+    
+    # Формируем текст со списком
+    text = f"📋 **Пользователи без подключения:** ({len(inactive_users)})\n\n"
+    
+    # Показываем всех пользователей (или первых 30, если много)
+    display_users = inactive_users[:30]
+    for u in display_users:
+        username = f"@{u.username}" if u.username else "Нет username"
+        reg_date = u.created_at.strftime("%d.%m.%Y") if hasattr(u, 'created_at') else "неизвестно"
+        text += f"• {u.full_name} ({username}) | ID: `{u.telegram_id}` | Регистрация: {reg_date}\n"
+    
+    if len(inactive_users) > 30:
+        text += f"\n... и еще {len(inactive_users) - 30} пользователей"
+    
+    # Кнопки действий
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"🎁 Выдать неделю всем ({len(inactive_users)})",
+        callback_data="admin_give_week_to_inactive"
+    )
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    builder.adjust(1)
+    
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.callback_query(F.data == "admin_give_week_to_inactive")
+async def admin_give_week_to_inactive(callback: CallbackQuery, bot: Bot):
+    """Выдает неделю подписки всем пользователям без подключения"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+
+    await safe_answer_callback(callback, "⏳ Проверяю пользователей...")
+    
+    # Получаем всех пользователей
+    all_users = await get_all_users()
+    
+    # Фильтруем пользователей без профиля
+    inactive_users = []
+    for u in all_users:
+        has_profile = u.vless_profile_data is not None and u.vless_profile_data != ""
+        if not has_profile:
+            inactive_users.append(u)
+    
+    if not inactive_users:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="admin_inactive_users_list")
+        await safe_edit_message(
+            bot=bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="✅ Нет пользователей для выдачи подписки",
+            reply_markup=builder.as_markup()
+        )
+        return
+    
+    # Запрос подтверждения
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"✅ Да, выдать неделю ({len(inactive_users)})",
+        callback_data="admin_confirm_give_week_inactive"
+    )
+    builder.button(text="❌ Отмена", callback_data="admin_inactive_users_list")
+    builder.adjust(1)
+    
+    # Показываем первых 10 пользователей для подтверждения
+    preview_text = ""
+    for u in inactive_users[:10]:
+        username = f"@{u.username}" if u.username else "Нет username"
+        preview_text += f"• {u.full_name} ({username}) - ID: `{u.telegram_id}`\n"
+    if len(inactive_users) > 10:
+        preview_text += f"\n... и еще {len(inactive_users) - 10} пользователей"
+    
+    text = (
+        f"⚠️ **Подтверждение выдачи подписки**\n\n"
+        f"Вы собираетесь выдать **1 неделю** подписки всем пользователям, которые ни разу не нажимали кнопку 'Подключить'.\n\n"
+        f"📊 **Всего пользователей:** {len(inactive_users)}\n\n"
+        f"📋 **Первые 10 пользователей:**\n{preview_text}\n\n"
+        f"Продолжить?"
+    )
+    
+    await safe_edit_message(
+        bot=bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.callback_query(F.data == "admin_confirm_give_week_inactive")
+async def admin_confirm_give_week_inactive(callback: CallbackQuery, bot: Bot):
+    """Подтверждение выдачи недели подписки не подключившимся"""
     user = await get_user(callback.from_user.id)
     if not user or not user.is_admin:
         await safe_answer_callback(callback, "⛔ Доступ запрещён")
@@ -1789,6 +1917,7 @@ async def admin_confirm_give_week(callback: CallbackQuery, bot: Bot):
     
     success_count = 0
     failed_count = 0
+    failed_users = []
     
     # Сообщение для админа
     admin_text = f"📊 **Результат выдачи недели:**\n\n"
@@ -1875,30 +2004,45 @@ async def admin_confirm_give_week(callback: CallbackQuery, bot: Bot):
                 
             else:
                 failed_count += 1
+                failed_users.append(f"{user.telegram_id} (ошибка создания профиля)")
                 logger.error(f"❌ Ошибка создания профиля для {user.telegram_id}")
                 
         except Exception as e:
             failed_count += 1
+            failed_users.append(f"{user.telegram_id} ({str(e)[:50]})")
             logger.error(f"❌ Ошибка при выдаче подписки {user.telegram_id}: {e}")
         
         # Небольшая задержка между отправками
         await asyncio.sleep(0.3)
     
     # Отчет админу
-    admin_text += (
+    admin_text = (
+        f"📊 **Результат выдачи недели:**\n\n"
         f"✅ Успешно: {success_count}\n"
         f"❌ Ошибок: {failed_count}\n"
-        f"📊 Всего: {len(inactive_users)}"
+        f"📊 Всего: {len(inactive_users)}\n\n"
     )
+    
+    if failed_users:
+        admin_text += "❌ **Ошибки у пользователей:**\n"
+        for uid in failed_users[:10]:
+            admin_text += f"• {uid}\n"
+        if len(failed_users) > 10:
+            admin_text += f"... и еще {len(failed_users) - 10}"
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Список не подключившихся", callback_data="admin_inactive_users_list")
+    builder.button(text="⬅️ Назад в меню", callback_data="admin_menu")
+    builder.adjust(1)
     
     await safe_edit_message(
         bot=bot,
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
         text=admin_text,
+        reply_markup=builder.as_markup(),
         parse_mode='Markdown'
     )
-
 
 async def show_promo_confirmation(target, state: FSMContext):
     """Показывает сводку и запрашивает подтверждение"""
