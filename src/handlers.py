@@ -871,4 +871,936 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
     user_id = data['user_id']
     parts = message.text.split()
 
-   
+    if len(parts) != 4:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Ошибка: нужно ввести 4 числа"
+        )
+        return
+
+    try:
+        months, days, hours, minutes = map(int, parts)
+        total_seconds = (
+            months * 30 * 24 * 60 * 60 +
+            days * 24 * 60 * 60 +
+            hours * 60 * 60 +
+            minutes * 60
+        )
+
+        with Session() as session:
+            user = session.query(User).filter_by(telegram_id=user_id).first()
+            if user:
+                now = datetime.utcnow()
+                if user.subscription_end and user.subscription_end > now:
+                    user.subscription_end += timedelta(seconds=total_seconds)
+                else:
+                    user.subscription_end = now + timedelta(seconds=total_seconds)
+                session.commit()
+                if user and user.vless_profile_data:
+                    profile = json.loads(user.vless_profile_data)
+                    email = profile.get("email")
+                    if email and user.subscription_end:
+                        api_updater = XUIAPI()
+                        with Session() as session:
+                            db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                            if db_user and db_user.is_enabled_in_panel == False:
+                                db_user.is_enabled_in_panel = True
+                                session.commit()
+                        try:
+                            if await api_updater.login():
+                                await api_updater.enable_client(email)
+                        finally:
+                            await api_updater.close()
+                await safe_send_message(
+                    bot=message.bot,
+                    chat_id=message.from_user.id,
+                    text=f"✅ Добавлено время пользователю {user_id}"
+                )
+            else:
+                await safe_send_message(
+                    bot=message.bot,
+                    chat_id=message.from_user.id,
+                    text="❌ Пользователь не найден"
+                )
+    except Exception as e:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"Ошибка: {str(e)}"
+        )
+    finally:
+        await state.clear()
+
+@router.callback_query(F.data == "admin_remove_time")
+async def admin_remove_time_start(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text="Введите Telegram ID пользователя:"
+    )
+    await state.set_state(AdminStates.REMOVE_TIME_USER)
+
+@router.message(AdminStates.REMOVE_TIME_USER)
+async def admin_remove_time_user(message: Message, state: FSMContext):
+    try:
+        user_id = int(message.text)
+        await state.update_data(user_id=user_id)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Введите количество времени в формате:\nМесяцы Дни Часы Минуты\nПример: 1 0 0 0"
+        )
+        await state.set_state(AdminStates.REMOVE_TIME_AMOUNT)
+    except ValueError:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Ошибка: ID должен быть числом"
+        )
+
+@router.message(AdminStates.REMOVE_TIME_AMOUNT)
+async def admin_remove_time_amount(message: Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data['user_id']
+    parts = message.text.split()
+
+    if len(parts) != 4:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Ошибка: нужно ввести 4 числа"
+        )
+        return
+
+    try:
+        months, days, hours, minutes = map(int, parts)
+        total_seconds = (
+            months * 30 * 24 * 60 * 60 +
+            days * 24 * 60 * 60 +
+            hours * 60 * 60 +
+            minutes * 60
+        )
+
+        with Session() as session:
+            user = session.query(User).filter_by(telegram_id=user_id).first()
+            if user:
+                now = datetime.utcnow()
+                if user.subscription_end:
+                    new_end = user.subscription_end - timedelta(seconds=total_seconds)
+                    if new_end < now:
+                        new_end = now
+                else:
+                    new_end = now
+                user.subscription_end = new_end
+                session.commit()
+                if user and user.vless_profile_data:
+                    profile = json.loads(user.vless_profile_data)
+                    email = profile.get("email")
+                    if email and user.subscription_end:
+                        expiry_ms = int(user.subscription_end.timestamp() * 1000)
+                        api_updater = XUIAPI()
+                        try:
+                            if await api_updater.login():
+                                await api_updater.update_client_expiry(email, expiry_ms)
+                        finally:
+                            await api_updater.close()
+                await safe_send_message(
+                    bot=message.bot,
+                    chat_id=message.from_user.id,
+                    text=f"✅ Удалено время у пользователя {user_id}"
+                )
+            else:
+                await safe_send_message(
+                    bot=message.bot,
+                    chat_id=message.from_user.id,
+                    text="❌ Пользователь не найден"
+                )
+    except Exception as e:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"Ошибка: {str(e)}"
+        )
+    finally:
+        await state.clear()
+
+@router.message(Command("use"))
+async def use_promo_cmd(message: Message):
+    args = message.text.split()
+    if len(args) != 2:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Использование: /use <код>"
+        )
+        return
+
+    code = args[1].strip()
+    success, msg = await activate_promo_code(message.from_user.id, code)
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text=msg
+    )
+
+@router.callback_query(F.data == "admin_user_list")
+async def admin_user_list(callback: CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ С подпиской", callback_data="user_list_active")
+    builder.button(text="🛑 Без подписки", callback_data="user_list_inactive")
+    builder.button(text="⏱️ Статические профили", callback_data="static_profiles_menu")
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    builder.adjust(1, 1, 1)
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="**Выберите фильтр**",
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.callback_query(F.data == "user_list_active")
+async def handle_user_list_active(callback: CallbackQuery):
+    users = await get_all_users(with_subscription=True)
+    await safe_answer_callback(callback)
+    if not users:
+        await safe_answer_callback(callback, "Нет пользователей с активной подпиской")
+        return
+
+    text = "👤 <b>Пользователи с активной подпиской:</b>\n\n"
+    for user in users:
+        expire_date = user.subscription_end.strftime("%d.%m.%Y %H:%M")
+        username = f"@{user.username}" if user.username else "none"
+        user_line = f"• {user.full_name} ({username} | <code>{user.telegram_id}</code>) - до <code>{expire_date}</code>\n"
+
+        if len(text) + len(user_line) > MAX_MESSAGE_LENGTH:
+            await safe_send_message(
+                bot=callback.bot,
+                chat_id=callback.from_user.id,
+                text=text,
+                parse_mode="HTML"
+            )
+            text = "👤 <b>Пользователи с активной подпиской (продолжение):</b>\n\n"
+
+        text += user_line
+
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text=text,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "user_list_inactive")
+async def handle_user_list_inactive(callback: CallbackQuery):
+    await safe_answer_callback(callback)
+    users = await get_all_users(with_subscription=False)
+    if not users:
+        await safe_answer_callback(callback, "Нет пользователей без подписки")
+        return
+
+    text = "👤 <b>Пользователи без подписки:</b>\n\n"
+    for user in users:
+        username = f"@{user.username}" if user.username else "none"
+        user_line = f"• {user.full_name} ({username} | <code>{user.telegram_id}</code>)\n"
+
+        if len(text) + len(user_line) > MAX_MESSAGE_LENGTH:
+            await safe_send_message(
+                bot=callback.bot,
+                chat_id=callback.from_user.id,
+                text=text,
+                parse_mode="HTML"
+            )
+            text = "👤 <b>Пользователи без подписки (продолжение):</b>\n\n"
+
+        text += user_line
+
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text=text,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(AdminPromoStates.choosing_type, F.data.in_({"promo_type_single", "promo_type_multi"}))
+async def admin_promo_choose_type(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    promo_type = "single" if callback.data == "promo_type_single" else "multi"
+    await state.update_data(promo_type=promo_type)
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="🗓 Введите количество месяцев (от 1 до 12):",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(AdminPromoStates.entering_months)
+
+@router.message(Command("listpromo"))
+async def list_promo_cmd(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён"
+        )
+        return
+
+    promos = await list_promocodes()
+    if not promos:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="📭 Промокодов пока нет"
+        )
+        return
+
+    text = "**📋 Список промокодов:**\n\n"
+    for p in promos:
+        status = "✅ Активен" if p.is_active else "❌ Неактивен"
+        expires = f", истекает {p.expires_at.strftime('%d.%m.%Y')}" if p.expires_at else ""
+        text += (
+            f"`{p.code}` — {p.months} мес., "
+            f"использовано {p.current_uses}/{p.max_uses}, {status}{expires}\n"
+        )
+    parts = split_text(text, MAX_MESSAGE_LENGTH)
+    for part in parts:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=part,
+            parse_mode="Markdown"
+        )
+
+@router.callback_query(F.data == "admin_send_message")
+async def admin_send_message_start(callback: CallbackQuery, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ С подпиской", callback_data="target_active")
+    builder.button(text="🛑 Без подписки", callback_data="target_inactive")
+    builder.button(text="👥 Всем пользователям", callback_data="target_all")
+    builder.button(text="↩️ Назад", callback_data="admin_menu")
+    builder.adjust(1)
+
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="Выберите целевую аудиторию для рассылки:",
+        reply_markup=builder.as_markup()
+    )
+
+@router.callback_query(F.data.startswith("target_"))
+async def admin_send_message_target(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    target = callback.data.split("_")[1]
+    await state.update_data(target=target)
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text="Введите сообщение для рассылки:"
+    )
+    await state.set_state(AdminStates.SEND_MESSAGE)
+
+@router.callback_query(F.data == "admin_create_promo")
+async def admin_create_promo_start(callback: CallbackQuery, state: FSMContext):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+    await safe_answer_callback(callback)
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔹 Одноразовый", callback_data="promo_type_single")
+    builder.button(text="🔸 Многоразовый", callback_data="promo_type_multi")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+    
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="🎫 **Создание промокода**\n\nВыберите тип промокода:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminPromoStates.choosing_type)
+
+@router.message(AdminStates.SEND_MESSAGE)
+async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    target = data['target']
+    text = message.text
+
+    users = []
+    if target == "active":
+        users = await get_all_users(with_subscription=True)
+    elif target == "inactive":
+        users = await get_all_users(with_subscription=False)
+    else:
+        users = await get_all_users()
+
+    success = 0
+    failed = 0
+
+    for user in users:
+        result = await safe_send_message(bot, user.telegram_id, text)
+        if result:
+            success += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    await safe_send_message(
+        bot=bot,
+        chat_id=message.from_user.id,
+        text=f"📨 Результаты рассылки:\n\n• Успешно: {success}\n• Не удалось: {failed}\n• Всего: {len(users)}"
+    )
+    await state.clear()
+
+@router.message(Command("addpromo"))
+async def add_promo_cmd(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён"
+        )
+        return
+
+    args = message.text.split()
+    if len(args) < 3:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Использование: /addpromo <месяцы> <макс_использований> [код]"
+        )
+        return
+
+    try:
+        months = int(args[1])
+        max_uses = int(args[2])
+    except ValueError:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Месяцы и макс. использования должны быть числами"
+        )
+        return
+
+    if not (1 <= months <= 12):
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Месяцы должны быть от 1 до 12"
+        )
+        return
+    if max_uses < 1:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Макс. использования должно быть >= 1"
+        )
+        return
+
+    code = args[3] if len(args) >= 4 else None
+
+    try:
+        promo = await create_promo_code(months, max_uses, code)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"✅ Промокод создан!\nКод: `{promo.code}`\nМесяцев: {promo.months}\nИспользований: {promo.current_uses}/{promo.max_uses}",
+            parse_mode="Markdown"
+        )
+    except ValueError as e:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Error creating promo: {e}")
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Внутренняя ошибка"
+        )
+
+@router.callback_query(F.data == "static_profiles_menu")
+async def static_profiles_menu(callback: CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆕 Добавить статический профиль", callback_data="static_profile_add")
+    builder.button(text="📋 Вывести статические профили", callback_data="static_profile_list")
+    builder.button(text="⬅️ Назад", callback_data="admin_user_list")
+    builder.adjust(1)
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="**Выберите действие**",
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.message(AdminPromoStates.entering_months)
+async def admin_promo_enter_months(message: Message, state: FSMContext):
+    try:
+        months = int(message.text.strip())
+        if not (1 <= months <= 12):
+            raise ValueError
+    except ValueError:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Пожалуйста, введите число от 1 до 12."
+        )
+        return
+    
+    await state.update_data(months=months)
+    data = await state.get_data()
+    
+    if data["promo_type"] == "single":
+        await state.update_data(max_uses=1)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔄 Сгенерировать автоматически", callback_data="promo_auto_code")
+        builder.button(text="✏️ Ввести свой код", callback_data="promo_custom_code")
+        builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+        builder.adjust(1)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="🔑 Выберите способ создания кода:",
+            reply_markup=builder.as_markup()
+        )
+        await state.set_state(AdminPromoStates.entering_custom_code)
+    else:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="🔢 Введите максимальное количество использований (целое число больше 1):",
+            reply_markup=builder.as_markup()
+        )
+        await state.set_state(AdminPromoStates.entering_max_uses)
+
+@router.callback_query(F.data == "static_profile_add")
+async def static_profile_add(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text="Введите имя для статического профиля:"
+    )
+    await state.set_state(AdminStates.CREATE_STATIC_PROFILE)
+
+@router.message(AdminStates.CREATE_STATIC_PROFILE)
+async def process_static_profile_name(message: Message, state: FSMContext):
+    profile_name = message.text
+    profile_data = await create_static_client(profile_name)
+
+    if profile_data:
+        vless_url = generate_vless_url(profile_data)
+        await create_static_profile(profile_name, vless_url)
+        profiles = await get_static_profiles()
+        for profile in profiles:
+            if profile.name == profile_name:
+                id = profile.id
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{id}")
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"Профиль создан!\n\n`{vless_url}`",
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
+        )
+    else:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Ошибка при создании профиля"
+        )
+
+    await state.clear()
+
+@router.callback_query(F.data == "static_profile_list")
+async def static_profile_list(callback: CallbackQuery):
+    profiles = await get_static_profiles()
+    if not profiles:
+        await safe_answer_callback(callback, "Нет статических профилей")
+        return
+
+    for profile in profiles:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{profile.id}")
+        await safe_send_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            text=f"**{profile.name}**\n`{profile.vless_url}`",
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
+        )
+
+@router.callback_query(F.data.startswith("delete_static_"))
+async def handle_delete_static_profile(callback: CallbackQuery):
+    try:
+        profile_id = int(callback.data.split("_")[-1])
+
+        with Session() as session:
+            profile = session.query(StaticProfile).filter_by(id=profile_id).first()
+            if not profile:
+                await safe_answer_callback(callback, "⚠️ Профиль не найден")
+                return
+
+            success = await delete_client_by_email(profile.name)
+            if not success:
+                logger.error(f"🛑 Ошибка удаления клиента из инбаунда: {profile.name}")
+
+            session.delete(profile)
+            session.commit()
+
+        await safe_answer_callback(callback, "✅ Профиль удален!")
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="🗑️ Профиль удален"
+        )
+    except Exception as e:
+        logger.error(f"🛑 Ошибка при удалении статического профиля: {e}")
+        await safe_answer_callback(callback, "⚠️ Ошибка при удалении профиля")
+
+@router.message(AdminPromoStates.entering_max_uses)
+async def admin_promo_enter_max_uses(message: Message, state: FSMContext):
+    try:
+        max_uses = int(message.text.strip())
+        if max_uses < 2:
+            raise ValueError
+    except ValueError:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Введите целое число больше 1."
+        )
+        return
+    
+    await state.update_data(max_uses=max_uses)
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Сгенерировать автоматически", callback_data="promo_auto_code")
+    builder.button(text="✏️ Ввести свой код", callback_data="promo_custom_code")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text="🔑 Выберите способ создания кода:",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(AdminPromoStates.entering_custom_code)
+
+@router.callback_query(F.data == "connect")
+async def connect_profile(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await safe_answer_callback(callback, "🛑 Ошибка профиля")
+        return
+
+    if user.subscription_end and user.subscription_end < datetime.utcnow():
+        await safe_answer_callback(callback, "⚠️ Подписка истекла! Продлите подписку.")
+        return
+
+    if not user.vless_profile_data:
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="⚙️ Создаем ваш VPN профиль..."
+        )
+        remaining_days = 0
+        if user.subscription_end and user.subscription_end > datetime.utcnow():
+            delta = user.subscription_end - datetime.utcnow()
+            remaining_days = delta.days
+        profile_data = await create_vless_profile(user.telegram_id, subscription_days=remaining_days)
+
+        if profile_data:
+            with Session() as session:
+                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                if db_user:
+                    db_user.vless_profile_data = json.dumps(profile_data)
+                    session.commit()
+            user = await get_user(user.telegram_id)
+        else:
+            await safe_send_message(
+                bot=callback.bot,
+                chat_id=callback.from_user.id,
+                text="🛑 Ошибка при создании профиля. Попробуйте позже."
+            )
+            return
+
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    if not profile_data:
+        await safe_send_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            text="⚠️ У вас пока нет созданного профиля."
+        )
+        return
+
+    stats = await get_user_stats(profile_data['email'])
+    sub_id = stats.get('subId')
+    if not sub_id and user.subscription_token:
+        sub_id = user.subscription_token
+        api = XUIAPI()
+        try:
+            await api.login()
+            await api.update_client_subid(profile_data['email'], sub_id)
+        finally:
+            await api.close()
+
+    if sub_id:
+        subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
+    else:
+        subscription_link = None
+
+    if subscription_link:
+        vless_url = subscription_link
+        text = (
+            "🎉 **Ваш VPN профиль готов!**\n\n"
+            "🔗 **Ваша персональная ссылка для подписки:**\n"
+            f"`{vless_url}`\n\n"
+            "ℹ️ **Инструкция по подключению:**\n"
+            "1. Скопируйте эту ссылку.\n"
+            "2. Откройте ваше VPN-приложение (V2RayNG, Nekobox, Hiddify, Happ).\n"
+            "3. Импортируйте ссылку как **подписку** (Subscription).\n"
+            "4. Приложение автоматически загрузит актуальную конфигурацию.\n\n"
+            "✅ Теперь при любых изменениях на сервере вам не нужно будет обновлять ссылку вручную."
+        )
+    else:
+        vless_url = generate_vless_url(profile_data)
+        text = (
+            "🎉 **Ваш VPN профиль готов!**\n\n"
+            "ℹ️ **Инструкция по подключению:**\n"
+            "1. Скачайте приложение для вашей платформы\n"
+            "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
+            f"`{vless_url}`\n\n"
+            "3. Активируйте соединение в приложении."
+        )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text='🖥️ Windows [Happ]', url='https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe')
+    builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
+    builder.button(text='🍎 Mac [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
+    builder.button(text='🍏 iOS [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
+    builder.button(text='🤖 Android [Happ]', url='https://play.google.com/store/apps/details?id=com.happproxy&hl=ru')
+    builder.button(text="⬅️ Назад", callback_data="back_to_menu")
+    builder.adjust(2, 2, 1, 1)
+
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_auto_code")
+async def admin_promo_auto_code(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await state.update_data(custom_code=None)
+    await show_promo_confirmation(callback, state)
+
+@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_custom_code")
+async def admin_promo_custom_code_prompt(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="✏️ Введите желаемый код (только буквы и цифры, без пробелов):",
+        reply_markup=builder.as_markup()
+    )
+
+@router.message(AdminPromoStates.entering_custom_code)
+async def admin_promo_enter_custom_code(message: Message, state: FSMContext):
+    code = message.text.strip()
+    if not code or not code.isalnum():
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Код может содержать только буквы и цифры. Попробуйте ещё раз."
+        )
+        return
+    
+    existing = await get_promo_by_code(code)
+    if existing:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Такой код уже существует. Введите другой код или используйте автогенерацию."
+        )
+        return
+    
+    await state.update_data(custom_code=code)
+    await show_promo_confirmation(message, state)
+
+@router.callback_query(F.data == "stats")
+async def user_stats(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.vless_profile_data:
+        await safe_answer_callback(callback, "⚠️ Профиль не создан")
+        return
+    
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="⚙️ Загружаем вашу статистику..."
+    )
+    
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    stats = await get_user_stats(profile_data["email"])
+
+    logger.debug(stats)
+    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
+    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
+    if upload_size == "GB":
+        upload = f"{int(float(upload) / 1024):.2f}"
+
+    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
+    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
+    if download_size == "GB":
+        download = f"{int(float(download) / 1024):.2f}"
+
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=f"📊 **Ваша статистика:**\n\n🔼 Загружено: `{upload} {upload_size}`\n🔽 Скачано: `{download} {download_size}`",
+        parse_mode='Markdown'
+    )
+
+async def show_promo_confirmation(target, state: FSMContext):
+    """Показывает сводку и запрашивает подтверждение"""
+    data = await state.get_data()
+    promo_type = "одноразовый" if data["promo_type"] == "single" else "многоразовый"
+    code_desc = data.get("custom_code") or "(будет сгенерирован автоматически)"
+    
+    text = (
+        f"📋 **Параметры промокода:**\n"
+        f"• Тип: {promo_type}\n"
+        f"• Месяцев: {data['months']}\n"
+        f"• Макс. использований: {data['max_uses']}\n"
+        f"• Код: `{code_desc}`\n\n"
+        f"Подтверждаете создание?"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, создать", callback_data="admin_promo_confirm")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+    
+    if isinstance(target, CallbackQuery):
+        await safe_edit_message(
+            bot=target.bot,
+            chat_id=target.from_user.id,
+            message_id=target.message.message_id,
+            text=text,
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+    else:
+        await safe_send_message(
+            bot=target.bot,
+            chat_id=target.from_user.id,
+            text=text,
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+    
+    await state.set_state(AdminPromoStates.confirming)
+
+@router.callback_query(F.data == "admin_network_stats")
+async def network_stats(callback: CallbackQuery):
+    stats = await get_global_stats()
+
+    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
+    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
+    if upload_size == "GB":
+        upload = f"{int(float(upload) / 1024):.2f}"
+
+    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
+    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
+    if download_size == "GB":
+        download = f"{int(float(download) / 1024):.2f}"
+
+    await safe_answer_callback(callback)
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=f"📊 **Статистика использования сети:**\n\n🔼 Upload - `{upload} {upload_size}` | 🔽 Download - `{download} {download_size}`",
+        parse_mode='Markdown'
+    )
+
+@router.callback_query(AdminPromoStates.confirming, F.data == "admin_promo_confirm")
+async def admin_promo_confirm(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    data = await state.get_data()
+    
+    try:
+        promo = await create_promo_code(
+            months=data['months'],
+            max_uses=data['max_uses'],
+            code=data.get('custom_code')
+        )
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text=f"✅ **Промокод успешно создан!**\n\nКод: `{promo.code}`\nМесяцев: {promo.months}\nТип: {'одноразовый' if promo.max_uses == 1 else 'многоразовый'}\nИспользований: {promo.current_uses}/{promo.max_uses}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка создания промокода: {e}")
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="❌ Произошла ошибка при создании промокода."
+        )
+    finally:
+        await state.finish()
+
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery, bot: Bot):
+    await safe_answer_callback(callback)
+    await show_menu(bot, callback.from_user.id, callback.message.message_id)
+
+@router.callback_query(F.data == "admin_promo_cancel")
+async def admin_promo_cancel(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await state.finish()
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="⛔ Создание промокода отменено."
+    )
+    await show_menu(callback.bot, callback.from_user.id, callback.message.message_id)
+
+def setup_handlers(dp: Dispatcher):
+    dp.include_router(router)
+    logger.info("✅ Handlers setup completed")
