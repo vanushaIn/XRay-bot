@@ -113,12 +113,12 @@ class XUIAPI:
     async def _update_client_settings(self, email: str, update_dict: dict) -> bool:
         """
         Обновляет параметры клиента в 3X-UI по его email.
-        Использует эндпоинт /panel/api/inbounds/updateClient/{client_uuid}
+        Использует эндпоинт /panel/api/clients/update/{email} (документация Clients)
         """
         try:
             await self._ensure_session()
             
-            # Получаем данные инбаунда
+            # Получаем текущие данные инбаунда, чтобы найти клиента
             inbound = await self.get_inbound(config.INBOUND_ID)
             if not inbound:
                 logger.error(f"🛑 Inbound {config.INBOUND_ID} not found")
@@ -138,20 +138,20 @@ class XUIAPI:
                 logger.error(f"🛑 Клиент с email {email} не найден в инбаунде {config.INBOUND_ID}")
                 return False
             
+            # Сохраняем оригинальный client_id
             client_uuid = target_client["id"]
             
             # Обновляем нужные поля
             for key, value in update_dict.items():
                 target_client[key] = value
             
-            # Отправляем обновленные настройки на эндпоинт 3X-UI
-            url = f"{self.base_url}{self.api_prefix}/inbounds/updateClient/{client_uuid}"
-            payload = {
-                "id": config.INBOUND_ID,
-                "settings": json.dumps({"clients": [target_client]})
-            }
+            # Используем эндпоинт /panel/api/clients/update/{email}
+            url = f"{self.base_url}{self.api_prefix}/clients/update/{email}"
             
-            logger.info(f"ℹ️ Обновление клиента {email} (UUID: {client_uuid})")
+            # Для обновления через clients/update нужно отправить полный объект клиента
+            payload = target_client.copy()
+            
+            logger.info(f"ℹ️ Обновление клиента {email} через /clients/update/{email}")
             logger.debug(f"⚙️ Payload: {json.dumps(payload)[:200]}")
             
             async with self.session.post(url, json=payload) as resp:
@@ -183,7 +183,8 @@ class XUIAPI:
         """Получение статистики трафика напрямую по email клиента"""
         try:
             await self._ensure_session()
-            url = f"{self.base_url}{self.api_prefix}/inbounds/getClientTraffics/{email}"
+            # Используем эндпоинт /panel/api/clients/traffic/{email}
+            url = f"{self.base_url}{self.api_prefix}/clients/traffic/{email}"
             async with self.session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -195,18 +196,17 @@ class XUIAPI:
         return {}
 
     async def add_client(self, inbound_id: int, client_uuid: str, email: str, total_gb: int = 0, expiry_time: int = 0) -> bool:
-        """Добавление клиента в существующий Inbound"""
+        """Добавление клиента через эндпоинт /panel/api/clients/add"""
         try:
             await self._ensure_session()
-            url = f"{self.base_url}{self.api_prefix}/inbounds/addClient"
-            total_bytes = total_gb * 1024 * 1024 * 1024 if total_gb > 0 else 0
-
-            client_settings = {
+            url = f"{self.base_url}{self.api_prefix}/clients/add"
+            
+            client_data = {
                 "id": client_uuid,
                 "email": email,
                 "flow": "xtls-rprx-vision",
                 "limitIp": 2,
-                "totalGB": total_bytes,
+                "totalGB": total_gb,
                 "expiryTime": expiry_time,
                 "enable": True,
                 "tgId": "",
@@ -214,11 +214,11 @@ class XUIAPI:
             }
 
             payload = {
-                "id": inbound_id,
-                "settings": json.dumps({"clients": [client_settings]})
+                "client": client_data,
+                "inboundIds": [inbound_id]
             }
 
-            logger.info(f"ℹ️ Добавление клиента {email} в инбаунд {inbound_id}")
+            logger.info(f"ℹ️ Добавление клиента {email} в инбаунд {inbound_id} через /clients/add")
             
             async with self.session.post(url, json=payload) as resp:
                 if resp.status == 200:
@@ -236,17 +236,42 @@ class XUIAPI:
             return False
 
     async def delete_client_by_uuid(self, inbound_id: int, client_uuid: str) -> bool:
-        """Удаление клиента по UUID из инбаунда"""
+        """Удаление клиента по UUID (используем /clients/del/{email})"""
         try:
             await self._ensure_session()
-            url = f"{self.base_url}{self.api_prefix}/inbounds/{inbound_id}/delClient/{client_uuid}"
-            logger.info(f"ℹ️ Удаление клиента с UUID {client_uuid} из инбаунда {inbound_id}")
+            # Для удаления по UUID нужно сначала найти email
+            inbound = await self.get_inbound(inbound_id)
+            if not inbound:
+                return False
+            
+            clients = await self._get_clients_from_inbound(inbound)
+            email = None
+            for c in clients:
+                if c.get("id") == client_uuid:
+                    email = c.get("email")
+                    break
+            
+            if not email:
+                logger.error(f"🛑 Не найден email для UUID {client_uuid}")
+                return False
+            
+            return await self.delete_client(email)
+        except Exception as e:
+            logger.error(f"💥 Ошибка удаления клиента: {e}")
+            return False
+
+    async def delete_client(self, email: str) -> bool:
+        """Удаление клиента по email через /panel/api/clients/del/{email}"""
+        try:
+            await self._ensure_session()
+            url = f"{self.base_url}{self.api_prefix}/clients/del/{email}"
+            logger.info(f"ℹ️ Удаление клиента {email} через /clients/del/{email}")
             
             async with self.session.post(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get("success"):
-                        logger.info(f"✅ Клиент успешно удален")
+                        logger.info(f"✅ Клиент {email} успешно удален")
                         return True
                     else:
                         logger.error(f"🛑 Ошибка удаления клиента: {data.get('msg')}")
@@ -344,32 +369,6 @@ class XUIAPI:
             logger.exception(f"🛑 Create static client error: {e}")
             return None
 
-    async def delete_client(self, email: str) -> bool:
-        """Удаление клиента по email"""
-        try:
-            await self._ensure_session()
-            
-            inbound = await self.get_inbound(config.INBOUND_ID)
-            if not inbound:
-                return False
-            
-            clients = await self._get_clients_from_inbound(inbound)
-            
-            client_uuid = None
-            for client in clients:
-                if client.get("email") == email:
-                    client_uuid = client.get("id")
-                    break
-            
-            if not client_uuid:
-                logger.warning(f"⚠️ Client with email {email} not found")
-                return False
-            
-            return await self.delete_client_by_uuid(config.INBOUND_ID, client_uuid)
-        except Exception as e:
-            logger.exception(f"🛑 Delete client error: {e}")
-            return False
-
     async def update_client_expiry(self, email: str, expiry_timestamp_ms: int) -> bool:
         """Обновление времени истечения подписки клиента"""
         logger.info(f"ℹ️ Обновление срока действия для {email} на timestamp: {expiry_timestamp_ms}")
@@ -445,11 +444,11 @@ class XUIAPI:
         return {"upload": 0, "download": 0}
 
     async def get_online_users(self):
-        """Получение количества онлайн пользователей"""
+        """Получение количества онлайн пользователей через /panel/api/clients/onlines"""
         try:
             await self._ensure_session()
             
-            url = f"{self.base_url}{self.api_prefix}/inbounds/onlines"
+            url = f"{self.base_url}{self.api_prefix}/clients/onlines"
             
             async with self.session.post(url) as resp:
                 if resp.status != 200:
@@ -462,9 +461,7 @@ class XUIAPI:
                     if data.get("success"):
                         users = data.get("obj")
                         if isinstance(users, list):
-                            for user in users:
-                                if str(user).startswith("user_"):
-                                    online += 1
+                            online = len([u for u in users if str(u).startswith("user_")])
                         return online
                 except:
                     return 0
