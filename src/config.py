@@ -22,7 +22,7 @@ class Config(BaseModel):
     REALITY_SHORT_ID: str = os.getenv("REALITY_SHORT_ID", "1234567890")
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
     
-    # Happ API
+    API_TOKEN: str = os.getenv("API_TOKEN", "")
    
     
 
