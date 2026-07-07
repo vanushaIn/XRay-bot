@@ -77,6 +77,13 @@ class Config(BaseModel):
         """Возвращает цену в звёздах (XTR) за выбранный период"""
         return self.STARS_PRICES.get(months, 0)
 
+    @property
+    def full_xui_url(self) -> str:
+        """Автоматически склеивает адрес и секретный путь панели без лишних слэшей"""
+        url = self.XUI_API_URL.rstrip('/')
+        path = self.XUI_BASE_PATH.strip('/')
+        return f"{url}/{path}" if path else url
+
 config = Config(
     ADMINS=os.getenv("ADMINS", ""),
     INBOUND_ID=os.getenv("INBOUND_ID", 15)
