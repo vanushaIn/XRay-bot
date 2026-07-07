@@ -74,6 +74,19 @@ class XUIAPI:
             logger.exception(f"🛑 Get inbound error: {e}")
             return None
 
+    async def _get_clients_from_inbound(self, inbound) -> list:
+        """Извлекает список клиентов из объекта инбаунда, обрабатывая разные форматы settings"""
+        try:
+            settings_raw = inbound.get("settings", "{}")
+            if isinstance(settings_raw, str):
+                settings = json.loads(settings_raw)
+            else:
+                settings = settings_raw
+            return settings.get("clients", [])
+        except Exception as e:
+            logger.error(f"💥 Ошибка извлечения клиентов из инбаунда: {e}")
+            return []
+
     async def _update_client_settings(self, email: str, update_dict: dict) -> bool:
         """
         Вспомогательный метод для обновления любых параметров клиента в 3X-UI по его email
@@ -86,8 +99,8 @@ class XUIAPI:
                 logger.error(f"🛑 Inbound {config.INBOUND_ID} not found")
                 return False
             
-            settings = json.loads(inbound.get("settings", "{}"))
-            clients = settings.get("clients", [])
+            # Получаем список клиентов
+            clients = await self._get_clients_from_inbound(inbound)
             
             # Ищем клиента по email
             target_client = None
@@ -102,7 +115,7 @@ class XUIAPI:
             
             client_uuid = target_client["id"]
             
-            # Обновляем нужные поля (например, enable, expiryTime, subId)
+            # Обновляем нужные поля
             target_client.update(update_dict)
             
             # Отправляем обновленные настройки на эндпоинт 3X-UI
@@ -150,13 +163,13 @@ class XUIAPI:
             client_settings = {
                 "id": client_uuid,
                 "email": email,
-                "flow": "xtls-rprx-vision",  # Обязательно для Reality на новых ядрах Xray
+                "flow": "xtls-rprx-vision",
                 "limitIp": 2,
                 "totalGB": total_bytes,
                 "expiryTime": expiry_time,
                 "enable": True,
                 "tgId": "",
-                "subId": client_uuid[:16]  # Требуется в 3X-UI для работы подписок
+                "subId": client_uuid[:16]
             }
 
             payload = {
@@ -206,15 +219,15 @@ class XUIAPI:
                 last_octet = (telegram_id % 253) + 2
                 client_ip = f"10.0.0.{last_octet}"
             
-            sub_id = secrets.token_hex(16)  # 32 символа hex
+            sub_id = secrets.token_hex(16)
             
             # Добавляем клиента через новый метод
             success = await self.add_client(
                 inbound_id=config.INBOUND_ID,
                 client_uuid=client_id,
                 email=email,
-                total_gb=0,  # безлимит
-                expiry_time=0  # безлимит
+                total_gb=0,
+                expiry_time=0
             )
             
             if success:
@@ -256,8 +269,8 @@ class XUIAPI:
                 inbound_id=config.INBOUND_ID,
                 client_uuid=client_id,
                 email=profile_name,
-                total_gb=0,  # безлимит
-                expiry_time=0  # безлимит
+                total_gb=0,
+                expiry_time=0
             )
             
             if success:
@@ -289,8 +302,8 @@ class XUIAPI:
             if not inbound:
                 return False
             
-            settings = json.loads(inbound["settings"])
-            clients = settings.get("clients", [])
+            # Получаем список клиентов
+            clients = await self._get_clients_from_inbound(inbound)
             
             # Ищем клиента с нужным email и получаем его UUID
             client_uuid = None
@@ -346,8 +359,8 @@ class XUIAPI:
             # Если не нашли в трафике, пробуем найти в настройках
             inbound = await self.get_inbound(config.INBOUND_ID)
             if inbound:
-                settings = json.loads(inbound["settings"])
-                for cl in settings.get("clients", []):
+                clients = await self._get_clients_from_inbound(inbound)
+                for cl in clients:
                     if cl.get("email") == email:
                         return {
                             "upload": 0,
@@ -433,7 +446,6 @@ class XUIAPI:
                 return None
             stream_settings = json.loads(inbound.get("streamSettings", "{}"))
             reality = stream_settings.get("realitySettings", {})
-            # Извлекаем параметры
             settings = {
                 "port": inbound.get("port"),
                 "public_key": reality.get("publicKey"),
@@ -461,6 +473,7 @@ class XUIAPI:
             f"&pbk={public_key}&fp={fingerprint}&sni={sni}&sid={short_id}&spx={spider_x}"
             f"#{email}"
         )
+
 
 # Функции-обертки для совместимости с существующим кодом
 async def create_vless_profile(telegram_id: int, subscription_days: int = 0):
@@ -499,8 +512,7 @@ async def get_global_stats():
     api = XUIAPI()
     try:
         await api.login()
-        inbound = await api.get_inbound(config.INBOUND_ID)
-        return inbound if inbound else {}
+        return await api.get_global_stats(config.INBOUND_ID)
     finally:
         await api.close()
 
@@ -513,8 +525,12 @@ async def enable_client_by_email(email: str) -> bool:
         await api.close()
 
 async def get_online_users():
-    """Возвращает список онлайн пользователей (заглушка или чтение логов панели)"""
-    return []
+    api = XUIAPI()
+    try:
+        await api.login()
+        return await api.get_online_users()
+    finally:
+        await api.close()
 
 async def get_user_stats(email: str):
     api = XUIAPI()
