@@ -209,7 +209,7 @@ class XUIAPI:
                 "totalGB": total_gb,
                 "expiryTime": expiry_time,
                 "enable": True,
-                "tgId": "0",
+                "tgId": 0,
                 "subId": client_uuid[:16]
             }
 
