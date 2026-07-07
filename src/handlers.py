@@ -823,6 +823,8 @@ async def admin_menu(callback: CallbackQuery):
     builder.button(text="📋 Список пользователей", callback_data="admin_user_list")
     builder.button(text="📊 Статистика исп. сети", callback_data="admin_network_stats")
     builder.button(text="📢 Рассылка", callback_data="admin_send_message")
+    # Новая кнопка
+    builder.button(text="🎁 Выдать неделю не подключившимся", callback_data="admin_give_week_inactive")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.button(text="🎫 Создать промокод", callback_data="admin_create_promo")
     builder.button(text="📊 Статистика промокодов", callback_data="admin_promo_stats")
@@ -1691,6 +1693,212 @@ async def user_stats(callback: CallbackQuery):
         text=f"📊 **Ваша статистика:**\n\n🔼 Загружено: `{upload} {upload_size}`\n🔽 Скачано: `{download} {download_size}`",
         parse_mode='Markdown'
     )
+
+@router.callback_query(F.data == "admin_give_week_inactive")
+async def admin_give_week_to_inactive(callback: CallbackQuery, bot: Bot):
+    """Выдает неделю подписки пользователям, которые никогда не нажимали кнопку 'Подключить'"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+
+    await safe_answer_callback(callback, "⏳ Проверяю пользователей...")
+    
+    # Получаем всех пользователей
+    all_users = await get_all_users()
+    
+    # Список пользователей, которые не подключались
+    inactive_users = []
+    already_have_sub = []
+    
+    for user in all_users:
+        # Проверяем, есть ли у пользователя профиль (нажимал ли кнопку Подключить)
+        has_profile = user.vless_profile_data is not None and user.vless_profile_data != ""
+        
+        if not has_profile:
+            # Пользователь никогда не подключался
+            inactive_users.append(user)
+        elif user.subscription_end and user.subscription_end > datetime.utcnow():
+            # У пользователя уже есть активная подписка
+            already_have_sub.append(user)
+    
+    if not inactive_users:
+        await safe_send_message(
+            bot=bot,
+            chat_id=callback.from_user.id,
+            text="✅ Все пользователи уже подключались к VPN!"
+        )
+        return
+    
+    # Подтверждение перед выдачей
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"✅ Да, выдать {len(inactive_users)} пользователям",
+        callback_data="admin_confirm_give_week"
+    )
+    builder.button(text="❌ Отмена", callback_data="admin_menu")
+    builder.adjust(1)
+    
+    text = (
+        f"📊 **Найдено пользователей без подключения:** {len(inactive_users)}\n"
+        f"👤 **С активной подпиской:** {len(already_have_sub)}\n\n"
+        f"⚠️ Вы собираетесь выдать **1 неделю** подписки всем пользователям, которые ни разу не нажимали кнопку 'Подключить'.\n\n"
+        f"Продолжить?"
+    )
+    
+    # Показываем список первых 10 пользователей
+    if inactive_users:
+        text += "\n📋 **Первые 10 пользователей:**\n"
+        for u in inactive_users[:10]:
+            username = f"@{u.username}" if u.username else "Нет username"
+            text += f"• {u.full_name} ({username}) - ID: `{u.telegram_id}`\n"
+        if len(inactive_users) > 10:
+            text += f"\n... и еще {len(inactive_users) - 10} пользователей"
+    
+    await safe_edit_message(
+        bot=bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.callback_query(F.data == "admin_confirm_give_week")
+async def admin_confirm_give_week(callback: CallbackQuery, bot: Bot):
+    """Подтверждение выдачи недели подписки"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+
+    await safe_answer_callback(callback, "⏳ Начинаю выдачу подписки...")
+    
+    # Получаем всех пользователей без профиля
+    all_users = await get_all_users()
+    inactive_users = [u for u in all_users if not u.vless_profile_data]
+    
+    if not inactive_users:
+        await safe_edit_message(
+            bot=bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="✅ Нет пользователей для выдачи подписки"
+        )
+        return
+    
+    success_count = 0
+    failed_count = 0
+    
+    # Сообщение для админа
+    admin_text = f"📊 **Результат выдачи недели:**\n\n"
+    
+    for user in inactive_users:
+        try:
+            # Создаем профиль для пользователя
+            profile_data = await create_vless_profile(user.telegram_id, subscription_days=7)
+            
+            if profile_data:
+                # Обновляем данные пользователя в БД
+                with Session() as session:
+                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                    if db_user:
+                        db_user.vless_profile_data = json.dumps(profile_data)
+                        db_user.subscription_token = profile_data.get("subId")
+                        # Устанавливаем подписку на 7 дней
+                        db_user.subscription_end = datetime.utcnow() + timedelta(days=7)
+                        db_user.is_enabled_in_panel = True
+                        session.commit()
+                
+                # Применяем ограничение скорости
+                client_ip = profile_data.get("client_ip")
+                if client_ip:
+                    with Session() as session:
+                        db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                        if db_user and not db_user.client_ip:
+                            db_user.client_ip = client_ip
+                            session.commit()
+                    await apply_tc_limit(client_ip)
+                
+                # Включаем клиента в панели
+                if profile_data.get("email"):
+                    await enable_client_by_email(profile_data["email"])
+                
+                # Формируем ссылку для подключения
+                subscription_link = None
+                sub_id = profile_data.get("subId")
+                if sub_id:
+                    subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
+                
+                # Отправляем пользователю сообщение с инструкцией
+                if subscription_link:
+                    text = (
+                        "🎉 **Вам выдана неделя VPN бесплатно!**\n\n"
+                        "🔗 **Ваша персональная ссылка для подписки:**\n"
+                        f"`{subscription_link}`\n\n"
+                        "ℹ️ **Инструкция по подключению:**\n"
+                        "1. Скопируйте эту ссылку.\n"
+                        "2. Откройте ваше VPN-приложение (V2RayNG, Nekobox, Hiddify, Happ).\n"
+                        "3. Импортируйте ссылку как **подписку** (Subscription).\n"
+                        "4. Приложение автоматически загрузит актуальную конфигурацию.\n\n"
+                        "✅ Теперь вы можете пользоваться VPN!"
+                    )
+                else:
+                    vless_url = generate_vless_url(profile_data)
+                    text = (
+                        "🎉 **Вам выдана неделя VPN бесплатно!**\n\n"
+                        "ℹ️ **Инструкция по подключению:**\n"
+                        "1. Скачайте приложение для вашей платформы\n"
+                        "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
+                        f"`{vless_url}`\n\n"
+                        "3. Активируйте соединение в приложении."
+                    )
+                
+                builder = InlineKeyboardBuilder()
+                builder.button(text='🖥️ Windows [Happ]', url='https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe')
+                builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
+                builder.button(text='🍎 Mac [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
+                builder.button(text='🍏 iOS [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
+                builder.button(text='🤖 Android [Happ]', url='https://play.google.com/store/apps/details?id=com.happproxy&hl=ru')
+                builder.adjust(2, 2, 1)
+                
+                await safe_send_message(
+                    bot=bot,
+                    chat_id=user.telegram_id,
+                    text=text,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='Markdown'
+                )
+                
+                success_count += 1
+                logger.info(f"✅ Выдана неделя подписки пользователю {user.telegram_id}")
+                
+            else:
+                failed_count += 1
+                logger.error(f"❌ Ошибка создания профиля для {user.telegram_id}")
+                
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"❌ Ошибка при выдаче подписки {user.telegram_id}: {e}")
+        
+        # Небольшая задержка между отправками
+        await asyncio.sleep(0.3)
+    
+    # Отчет админу
+    admin_text += (
+        f"✅ Успешно: {success_count}\n"
+        f"❌ Ошибок: {failed_count}\n"
+        f"📊 Всего: {len(inactive_users)}"
+    )
+    
+    await safe_edit_message(
+        bot=bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=admin_text,
+        parse_mode='Markdown'
+    )
+
 
 async def show_promo_confirmation(target, state: FSMContext):
     """Показывает сводку и запрашивает подтверждение"""
