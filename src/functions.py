@@ -74,6 +74,59 @@ class XUIAPI:
             logger.exception(f"🛑 Get inbound error: {e}")
             return None
 
+    async def _update_client_settings(self, email: str, update_dict: dict) -> bool:
+        """
+        Вспомогательный метод для обновления любых параметров клиента в 3X-UI по его email
+        Использует эндпоинт /panel/api/inbounds/updateClient/{client_uuid}
+        """
+        try:
+            # Получаем текущие данные инбаунда, чтобы найти UUID клиента по email
+            inbound = await self.get_inbound(config.INBOUND_ID)
+            if not inbound:
+                logger.error(f"🛑 Inbound {config.INBOUND_ID} not found")
+                return False
+            
+            settings = json.loads(inbound.get("settings", "{}"))
+            clients = settings.get("clients", [])
+            
+            # Ищем клиента по email
+            target_client = None
+            for c in clients:
+                if c.get("email") == email:
+                    target_client = c
+                    break
+            
+            if not target_client:
+                logger.error(f"🛑 Клиент с email {email} не найден в инбаунде {config.INBOUND_ID}")
+                return False
+            
+            client_uuid = target_client["id"]
+            
+            # Обновляем нужные поля (например, enable, expiryTime, subId)
+            target_client.update(update_dict)
+            
+            # Отправляем обновленные настройки на эндпоинт 3X-UI
+            url = f"{self.base_url}{self.api_prefix}/inbounds/updateClient/{client_uuid}"
+            payload = {
+                "id": config.INBOUND_ID,
+                "settings": json.dumps({"clients": [target_client]})
+            }
+            
+            async with self.session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("success"):
+                        logger.info(f"✅ Клиент {email} успешно обновлен")
+                        return True
+                    else:
+                        logger.error(f"🛑 Ошибка обновления клиента {email}: {data.get('msg')}")
+                        return False
+                logger.error(f"🛑 Ошибка обновления клиента {email}. Статус: {resp.status}")
+                return False
+        except Exception as e:
+            logger.error(f"💥 Исключение при обновлении настроек клиента {email}: {e}")
+            return False
+
     async def get_client_traffic(self, email: str) -> dict:
         """Новый метод 3X-UI для получения статистики трафика напрямую по email клиента"""
         try:
@@ -225,7 +278,7 @@ class XUIAPI:
             logger.exception(f"🛑 Create static client error: {e}")
             return None
 
-    async def delete_client(self, email: str):
+    async def delete_client(self, email: str) -> bool:
         """Удаление клиента по email"""
         if not await self.login():
             return False
@@ -255,7 +308,27 @@ class XUIAPI:
         except Exception as e:
             logger.exception(f"🛑 Delete client error: {e}")
             return False
-    
+
+    async def update_client_expiry(self, email: str, expiry_timestamp_ms: int) -> bool:
+        """Обновление времени истечения подписки клиента в 3X-UI"""
+        logger.info(f"ℹ️ Обновление срока действия для {email} на timestamp: {expiry_timestamp_ms}")
+        return await self._update_client_settings(email, {"expiryTime": expiry_timestamp_ms})
+
+    async def update_client_subid(self, email: str, new_subid: str) -> bool:
+        """Обновляет subId у клиента в inbound для ссылок подписок"""
+        logger.info(f"ℹ️ Обновление subId для {email} на: {new_subid}")
+        return await self._update_client_settings(email, {"subId": new_subid})
+
+    async def disable_client_by_email(self, email: str) -> bool:
+        """Отключает клиента по email (enable = false)"""
+        logger.info(f"🔒 Отключение клиента {email} в панели 3X-UI")
+        return await self._update_client_settings(email, {"enable": False})
+
+    async def enable_client(self, email: str) -> bool:
+        """Включает клиента по email (enable = true)"""
+        logger.info(f"🔓 Включение клиента {email} в панели 3X-UI")
+        return await self._update_client_settings(email, {"enable": True})
+
     async def get_user_stats(self, email: str):
         """Получение статистики и subId по email с использованием нового API"""
         if not await self.login():
@@ -284,7 +357,7 @@ class XUIAPI:
         except Exception as e:
             logger.error(f"🛑 Stats error: {e}")
         return {"upload": 0, "download": 0, "subId": None}
-    
+
     async def get_global_stats(self, inbound_id: int):
         """Получение статистики инбаунда"""
         if not await self.login():
@@ -342,31 +415,6 @@ class XUIAPI:
         except Exception as e:
             logger.error(f"🛑 Stats error: {e}")
             return 0
-
-    async def update_client_expiry(self, email: str, expiry_timestamp_ms: int) -> bool:
-        """Обновление времени истечения клиента"""
-        # В новой версии 3X-UI нет прямого метода для обновления expiry
-        # Можно реализовать через удаление и добавление, но пока вернем False
-        logger.warning("⚠️ update_client_expiry not implemented for new 3X-UI API")
-        return False
-
-    async def update_client_subid(self, email: str, new_subid: str) -> bool:
-        """Обновляет subId у клиента в inbound"""
-        # В новой версии 3X-UI нет прямого метода для обновления subId
-        logger.warning("⚠️ update_client_subid not implemented for new 3X-UI API")
-        return False
-
-    async def disable_client_by_email(self, email: str) -> bool:
-        """Отключает клиента по email (enable = false)"""
-        # В новой версии 3X-UI нет прямого метода для отключения
-        logger.warning("⚠️ disable_client_by_email not implemented for new 3X-UI API")
-        return False
-
-    async def enable_client(self, email: str) -> bool:
-        """Включает клиента по email (enable = true)"""
-        # В новой версии 3X-UI нет прямого метода для включения
-        logger.warning("⚠️ enable_client not implemented for new 3X-UI API")
-        return False
 
     @staticmethod
     async def get_inbound_settings(inbound_id: int = None):
@@ -451,7 +499,8 @@ async def get_global_stats():
     api = XUIAPI()
     try:
         await api.login()
-        return await api.get_global_stats(config.INBOUND_ID)
+        inbound = await api.get_inbound(config.INBOUND_ID)
+        return inbound if inbound else {}
     finally:
         await api.close()
 
@@ -464,12 +513,8 @@ async def enable_client_by_email(email: str) -> bool:
         await api.close()
 
 async def get_online_users():
-    api = XUIAPI()
-    try:
-        await api.login()
-        return await api.get_online_users()
-    finally:
-        await api.close()
+    """Возвращает список онлайн пользователей (заглушка или чтение логов панели)"""
+    return []
 
 async def get_user_stats(email: str):
     api = XUIAPI()
