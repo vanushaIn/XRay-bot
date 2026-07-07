@@ -23,9 +23,10 @@ class Config(BaseModel):
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
     
     API_TOKEN: str = os.getenv("API_TOKEN", "")
-   
     
-
+    # Добавляем порт для HTTP сервера
+    HAPP_PORT: int = Field(default=os.getenv("HAPP_PORT", 8080))
+   
     # Настройки цен и скидок
     PRICES: Dict[int, Dict[str, int]] = {
         1: {"base_price": 250, "discount_percent": 0},
@@ -35,7 +36,6 @@ class Config(BaseModel):
     }
 
     # Цены в Telegram Stars (XTR) за период подписки
-    # Значения — количество звёзд, можно настроить под себя
     STARS_PRICES: Dict[int, int] = {
         1: 50,
         3: 250,
@@ -43,7 +43,6 @@ class Config(BaseModel):
         12: 800
     }
 
-    # Инструкция/ссылка для оплаты через Crypto Bot (настраивается через .env)
     CRYPTOBOT_INFO: str = os.getenv(
         "CRYPTOBOT_INFO",
         "Для оплаты через Crypto Bot отправьте USDT на нашего бота и отправьте чек администратору."
@@ -60,6 +59,12 @@ class Config(BaseModel):
         if isinstance(value, str):
             return int(value)
         return value or 15
+    
+    @field_validator('HAPP_PORT', mode='before')
+    def parse_happ_port(cls, value):
+        if isinstance(value, str):
+            return int(value)
+        return value or 8080
     
     def calculate_price(self, months: int) -> int:
         """Вычисляет итоговую стоимость с учетом скидки"""
@@ -86,5 +91,6 @@ class Config(BaseModel):
 
 config = Config(
     ADMINS=os.getenv("ADMINS", ""),
-    INBOUND_ID=os.getenv("INBOUND_ID", 15)
+    INBOUND_ID=os.getenv("INBOUND_ID", 15),
+    HAPP_PORT=os.getenv("HAPP_PORT", 8080)
 )
