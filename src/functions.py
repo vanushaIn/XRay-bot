@@ -113,7 +113,7 @@ class XUIAPI:
     async def _update_client_settings(self, email: str, update_dict: dict) -> bool:
         """
         Обновляет параметры клиента в 3X-UI по его email.
-        Использует эндпоинт /panel/api/clients/update/{email} (документация Clients)
+        Использует эндпоинт /panel/api/clients/update/{email}
         """
         try:
             await self._ensure_session()
@@ -200,25 +200,27 @@ class XUIAPI:
         try:
             await self._ensure_session()
             url = f"{self.base_url}{self.api_prefix}/clients/add"
-            
-            client_data = {
+            total_bytes = total_gb * 1024 * 1024 * 1024 if total_gb > 0 else 0
+
+            client_settings = {
                 "id": client_uuid,
                 "email": email,
-                "flow": "",
+                "flow": "xtls-rprx-vision",
                 "limitIp": 2,
-                "totalGB": total_gb,
+                "totalGB": total_bytes,
                 "expiryTime": expiry_time,
                 "enable": True,
-                "tgId": 0,
+                "tgId": 0,  # ✅ ПРАВИЛЬНО: число, а не строка
                 "subId": client_uuid[:16]
             }
 
             payload = {
-                "client": client_data,
+                "client": client_settings,
                 "inboundIds": [inbound_id]
             }
 
             logger.info(f"ℹ️ Добавление клиента {email} в инбаунд {inbound_id} через /clients/add")
+            logger.debug(f"⚙️ Payload: {json.dumps(payload)}")
             
             async with self.session.post(url, json=payload) as resp:
                 if resp.status == 200:
@@ -229,8 +231,10 @@ class XUIAPI:
                     else:
                         logger.error(f"🛑 Ошибка добавления клиента {email}: {data.get('msg')}")
                         return False
-                logger.error(f"🛑 Ошибка добавления клиента. Статус: {resp.status}")
-                return False
+                else:
+                    response_text = await resp.text()
+                    logger.error(f"🛑 Ошибка добавления клиента. Статус: {resp.status}, Ответ: {response_text[:200]}")
+                    return False
         except Exception as e:
             logger.error(f"💥 Ошибка добавления клиента: {e}")
             return False
@@ -293,7 +297,7 @@ class XUIAPI:
                 return None
 
             client_id = str(uuid.uuid4())
-            email = f"user_{telegram_id}"
+            email = f"user_{telegram_id}_{str(uuid.uuid4())[:4]}"  # Добавляем суффикс для уникальности
             
             # Генерация IP, если не передан
             if client_ip is None:
@@ -330,6 +334,8 @@ class XUIAPI:
         except Exception as e:
             logger.exception(f"🛑 Create profile error: {e}")
             return None
+
+    # ... остальные методы остаются без изменений ...
 
     async def create_static_client(self, profile_name: str):
         """Создание статического клиента"""
