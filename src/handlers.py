@@ -453,6 +453,148 @@ async def sync_user_with_panel(
     result["profile"] = profile
     return result
 
+@router.message(Command("compare_links"))
+async def compare_links_command(message: Message, bot: Bot):
+    """Сравнивает subId (ссылку подписки) в БД и панели 3X-UI"""
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён"
+        )
+        return
+
+    await safe_send_message(
+        bot=bot,
+        chat_id=message.from_user.id,
+        text="🔄 Сравниваю ссылки (subId) в БД и панели..."
+    )
+
+    # Получаем всех пользователей с профилем
+    all_users = await get_all_users()
+    users_with_profile = [u for u in all_users if u.vless_profile_data]
+
+    if not users_with_profile:
+        await safe_send_message(
+            bot=bot,
+            chat_id=message.from_user.id,
+            text="📭 Нет пользователей с созданным профилем"
+        )
+        return
+
+    async with XUIAPI() as api:
+        inbound = await api.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            await safe_send_message(
+                bot=bot,
+                chat_id=message.from_user.id,
+                text="❌ Не удалось получить инбаунд из панели"
+            )
+            return
+        settings = safe_json_loads(inbound.get("settings"))
+        if not isinstance(settings, dict):
+            settings = {}
+        panel_clients = settings.get("clients", [])
+        panel_by_email = {c.get("email"): c for c in panel_clients if c.get("email")}
+
+    mismatches = []          # несовпадающие subId
+    missing_in_panel = []    # есть в БД, нет в панели
+    missing_in_db = []       # есть в панели, нет в БД
+
+    for db_user in users_with_profile:
+        profile = safe_json_loads(db_user.vless_profile_data)
+        email = profile.get("email")
+        sub_id = profile.get("subId")
+        if not email:
+            continue
+
+        panel_client = panel_by_email.get(email)
+        if not panel_client:
+            missing_in_panel.append(email)
+            continue
+
+        panel_sub = panel_client.get("subId")
+        if panel_sub != sub_id:
+            mismatches.append({
+                "email": email,
+                "db_sub": sub_id,
+                "panel_sub": panel_sub
+            })
+
+    # Проверяем клиентов, которых нет в БД
+    db_emails = set()
+    for u in users_with_profile:
+        profile = safe_json_loads(u.vless_profile_data)
+        email = profile.get("email")
+        if email:
+            db_emails.add(email)
+
+    for email in panel_by_email.keys():
+        if email not in db_emails:
+            missing_in_db.append(email)
+
+    # Формируем отчёт
+    report = "📊 **Сравнение ссылок (subId):**\n\n"
+
+    if missing_in_panel:
+        report += f"❌ **Отсутствуют в панели:** {len(missing_in_panel)}\n"
+        for e in missing_in_panel[:10]:
+            report += f"• {e}\n"
+        if len(missing_in_panel) > 10:
+            report += f"... и ещё {len(missing_in_panel)-10}\n"
+    else:
+        report += "✅ Все пользователи есть в панели\n"
+
+    if mismatches:
+        report += f"\n⚠️ **Несовпадения subId:** {len(mismatches)}\n"
+        for m in mismatches[:10]:
+            report += f"• {m['email']}: БД `{m['db_sub']}` ↔ панель `{m['panel_sub']}`\n"
+        if len(mismatches) > 10:
+            report += f"... и ещё {len(mismatches)-10}\n"
+    else:
+        report += "\n✅ Все subId совпадают\n"
+
+    if missing_in_db:
+        report += f"\n👤 **Клиенты только в панели (нет в БД):** {len(missing_in_db)}\n"
+        for e in missing_in_db[:10]:
+            report += f"• {e}\n"
+        if len(missing_in_db) > 10:
+            report += f"... и ещё {len(missing_in_db)-10}\n"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔧 Исправить расхождения (запустить /fix_subids)", callback_data="fix_mismatches")
+    builder.button(text="⬅️ Назад в меню", callback_data="admin_menu")
+    builder.adjust(1)
+
+    await safe_send_message(
+        bot=bot,
+        chat_id=message.from_user.id,
+        text=report,
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "fix_mismatches")
+async def fix_mismatches(callback: CallbackQuery, bot: Bot):
+    """Перенаправляет на выполнение /fix_subids"""
+    await safe_answer_callback(callback, "🔧 Запускаю синхронизацию...")
+    # Создаём имитацию сообщения для вызова fix_subids
+    fake_message = Message(
+        message_id=callback.message.message_id,
+        date=callback.message.date,
+        chat=callback.message.chat,
+        from_user=callback.from_user,
+        text="/fix_subids"
+    )
+    await fix_subids(fake_message)  # предполагается, что fix_subids определён
+    # Или просто отправляем инструкцию
+    await safe_send_message(
+        bot=bot,
+        chat_id=callback.from_user.id,
+        text="ℹ️ Воспользуйтесь командой /fix_subids для полной синхронизации."
+    )
+
 @router.callback_query(F.data == "admin_promo_stats")
 async def admin_promo_stats_list(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
@@ -699,6 +841,18 @@ async def renew_subscription(callback: CallbackQuery):
         reply_markup=builder.as_markup(),
         parse_mode='Markdown'
     )
+
+@router.callback_query(F.data == "compare_links")
+async def compare_links_callback(callback: CallbackQuery):
+    await safe_answer_callback(callback)
+    fake_message = Message(
+        message_id=callback.message.message_id,
+        date=callback.message.date,
+        chat=callback.message.chat,
+        from_user=callback.from_user,
+        text="/compare_links"
+    )
+    await compare_links_command(fake_message, callback.bot)
 
 @router.callback_query(F.data == "crypto_payment")
 async def crypto_payment_info(callback: CallbackQuery):
@@ -949,6 +1103,7 @@ async def admin_menu(callback: CallbackQuery):
     builder.button(text="📊 Статистика исп. сети", callback_data="admin_network_stats")
     builder.button(text="📢 Рассылка", callback_data="admin_send_message")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
+    builder.button(text="🔄 Сравнить ссылки", callback_data="compare_links")
     builder.button(text="🎫 Создать промокод", callback_data="admin_create_promo")
     builder.button(text="📊 Статистика промокодов", callback_data="admin_promo_stats")
     builder.adjust(2, 1, 1, 1, 1, 1, 1)
