@@ -646,7 +646,11 @@ async def fix_subids(message: Message):
             )
             return
         
-        settings = json.loads(inbound["settings"])
+        settings = inbound.get("settings")
+        if isinstance(settings, str):
+            settings = json.loads(settings)
+        elif not isinstance(settings, dict):
+            settings = {}   # fallback на случай, если пришло что-то неожиданное
         clients = settings.get("clients", [])
         
         updated = 0
