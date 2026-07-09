@@ -55,7 +55,19 @@ class XUIAPI:
             )
             logger.info("✅ Авторизация выполнена через Bearer API Token")
         return True
-
+    async def find_client_by_email(self, email: str) -> dict:
+        """Ищет клиента по email в инбаунде config.INBOUND_ID"""
+        inbound = await self.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            return None
+        settings = safe_json_loads(inbound.get("settings"))
+        if not isinstance(settings, dict):
+            return None
+        clients = settings.get("clients", [])
+        for c in clients:
+            if c.get("email") == email:
+                return c
+        return None
     async def _ensure_session(self):
         """Убеждается, что сессия открыта"""
         if self.session is None or self.session.closed:
@@ -616,6 +628,8 @@ async def apply_tc_limit(ip: str):
     try:
         subprocess.run(["/opt/XRay-bot/scripts/tc_limit.sh", ip], check=True)
         logger.info(f"✅ tc limit applied for {ip}")
+    except FileNotFoundError:
+        logger.warning(f"⚠️ Скрипт tc_limit.sh не найден, пропускаем ограничение для {ip}")
     except subprocess.CalledProcessError as e:
         logger.error(f"❌ Failed to apply tc limit for {ip}: {e}")
 

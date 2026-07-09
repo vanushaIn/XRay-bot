@@ -322,19 +322,10 @@ from sqlalchemy.orm import Session
 # from database import User, Session, get_all_users
 
 async def sync_user_with_panel(
-    user,  # объект User из БД
+    user,
     subscription_days: int = 7,
     force_create: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Синхронизирует пользователя с панелью 3X-UI.
-    Возвращает словарь с полями:
-        - profile: dict
-        - subscription_link: str or None
-        - created: bool – был ли создан новый клиент
-        - updated: bool – обновлён ли subId
-        - error: str or None
-    """
     result = {
         "profile": None,
         "subscription_link": None,
@@ -367,11 +358,15 @@ async def sync_user_with_panel(
         settings = safe_json_loads(inbound.get("settings"))
         if not isinstance(settings, dict):
             settings = {}
+
         clients = settings.get("clients", [])
         panel_emails = {c.get("email") for c in clients if c.get("email")}
 
-        if email not in panel_emails:
-            # Клиента нет – добавляем
+        # Проверяем, есть ли клиент с таким email в панели
+        client_exists = email in panel_emails
+
+        if not client_exists:
+            # Пытаемся добавить клиента
             logger.info(f"➕ Добавляем клиента {email} в инбаунд")
             add_ok = await api.add_client(
                 inbound_id=config.INBOUND_ID,
@@ -380,31 +375,69 @@ async def sync_user_with_panel(
                 totalGB=0,
                 expiryTime=0,
                 enable=True,
-                flow=profile.get("flow", ""),
+                flow=profile.get("flow", "xtls-rprx-vision"),
+                sub_id=profile.get("subId")
             )
             if not add_ok:
-                result["error"] = f"Ошибка добавления клиента {email}"
-                return result
-            result["created"] = True
-            # Применяем ограничение скорости, если есть IP
-            client_ip = profile.get("client_ip")
-            if client_ip:
-                await apply_tc_limit(client_ip)
-        else:
-            # Клиент есть – проверяем subId
-            panel_client = next(c for c in clients if c.get("email") == email)
-            current_sub = panel_client.get("subId", "")
-            if not current_sub:
-                new_subid = secrets.token_hex(16)
-                update_ok = await api.update_client_subid(email, new_subid)
-                if not update_ok:
-                    result["error"] = f"Не удалось обновить subId для {email}"
+                # Если добавить не удалось, возможно клиент уже есть (дубликат)
+                # Проверим ещё раз, возможно email изменился или есть другой с таким же
+                # Попробуем найти клиента по email через API
+                found_client = await api.find_client_by_email(email)  # новый метод
+                if found_client:
+                    logger.info(f"🔍 Клиент {email} найден в панели (вероятно, уже существовал)")
+                    client_exists = True
+                    # Используем найденного клиента
+                    clients = [found_client]  # или обновляем список
+                else:
+                    result["error"] = f"Ошибка добавления клиента {email}"
                     return result
-                profile["subId"] = new_subid
-                result["updated"] = True
-                logger.info(f"🔄 Обновлён subId для {email} -> {new_subid[:8]}...")
             else:
-                profile["subId"] = current_sub
+                result["created"] = True
+                client_exists = True  # теперь он точно есть
+                # Применяем ограничение скорости
+                client_ip = profile.get("client_ip")
+                if client_ip:
+                    try:
+                        await apply_tc_limit(client_ip)
+                    except FileNotFoundError:
+                        logger.warning(f"⚠️ Скрипт tc_limit.sh не найден, пропускаем ограничение для {client_ip}")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка применения tc limit для {client_ip}: {e}")
+
+        # Если клиент существует (или был только что создан) – проверяем subId
+        if client_exists:
+            # Получаем актуального клиента из панели (обновлённый список)
+            if not result["created"]:
+                # Если не создавали, нужно получить клиента из панели для обновления subId
+                # Используем метод find_client_by_email
+                panel_client = await api.find_client_by_email(email)
+                if not panel_client:
+                    result["error"] = f"Не удалось найти клиента {email} в панели"
+                    return result
+            else:
+                # Если создали, то panel_client уже есть в inbound, но мы его не сохранили
+                # Поэтому перечитываем инбаунд, чтобы получить обновлённый список
+                inbound_updated = await api.get_inbound(config.INBOUND_ID)
+                if inbound_updated:
+                    settings_updated = safe_json_loads(inbound_updated.get("settings"))
+                    clients_updated = settings_updated.get("clients", [])
+                    panel_client = next((c for c in clients_updated if c.get("email") == email), None)
+                else:
+                    panel_client = None
+
+            if panel_client:
+                current_sub = panel_client.get("subId", "")
+                if not current_sub:
+                    new_subid = secrets.token_hex(16)
+                    update_ok = await api.update_client_subid(email, new_subid)
+                    if not update_ok:
+                        result["error"] = f"Не удалось обновить subId для {email}"
+                        return result
+                    profile["subId"] = new_subid
+                    result["updated"] = True
+                    logger.info(f"🔄 Обновлён subId для {email} -> {new_subid[:8]}...")
+                else:
+                    profile["subId"] = current_sub
 
     # 3. Сохраняем профиль в БД
     with Session(bind=engine) as session:
