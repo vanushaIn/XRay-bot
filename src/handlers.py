@@ -7,7 +7,7 @@ import uuid
 import sqlite3
 from datetime import datetime, timedelta
 from aiogram.exceptions import TelegramForbiddenError
-
+from database import User, Session, engine  # добавьте engine
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.filters import Command, StateFilter
@@ -407,7 +407,7 @@ async def sync_user_with_panel(
                 profile["subId"] = current_sub
 
     # 3. Сохраняем профиль в БД
-    with Session() as session:
+    with Session(bind=engine) as session:
         db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
         if db_user:
             db_user.vless_profile_data = json.dumps(profile)
