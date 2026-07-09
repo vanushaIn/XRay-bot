@@ -310,6 +310,118 @@ async def referral_cmd(message: Message, bot: Bot):
     )
     await safe_send_message(message.from_user.id, text, parse_mode="Markdown")
 
+import secrets
+import json
+from datetime import datetime, timedelta
+from typing import Dict, Any
+from loguru import logger
+from sqlalchemy.orm import Session
+
+# Предполагаем, что эти функции уже импортированы из других модулей
+# from functions import create_vless_profile, safe_json_loads, XUIAPI, apply_tc_limit, enable_client_by_email
+# from database import User, Session, get_all_users
+
+async def sync_user_with_panel(
+    user,  # объект User из БД
+    subscription_days: int = 7,
+    force_create: bool = False,
+) -> Dict[str, Any]:
+    """
+    Синхронизирует пользователя с панелью 3X-UI.
+    Возвращает словарь с полями:
+        - profile: dict
+        - subscription_link: str or None
+        - created: bool – был ли создан новый клиент
+        - updated: bool – обновлён ли subId
+        - error: str or None
+    """
+    result = {
+        "profile": None,
+        "subscription_link": None,
+        "created": False,
+        "updated": False,
+        "error": None,
+    }
+
+    # 1. Профиль
+    profile = safe_json_loads(user.vless_profile_data)
+    if not profile or force_create:
+        profile = await create_vless_profile(user.telegram_id, subscription_days=subscription_days)
+        if not profile:
+            result["error"] = "Не удалось создать профиль"
+            return result
+        logger.info(f"📝 Создан новый профиль для user {user.telegram_id}")
+
+    email = profile.get("email")
+    if not email:
+        email = f"user_{user.telegram_id}"
+        profile["email"] = email
+
+    # 2. Работа с панелью
+    async with XUIAPI() as api:
+        inbound = await api.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            result["error"] = "Не удалось получить инбаунд"
+            return result
+
+        settings = safe_json_loads(inbound.get("settings"))
+        clients = settings.get("clients", [])
+        panel_emails = {c.get("email") for c in clients if c.get("email")}
+
+        if email not in panel_emails:
+            # Клиента нет – добавляем
+            logger.info(f"➕ Добавляем клиента {email} в инбаунд")
+            add_ok = await api.add_client(
+                inbound_id=config.INBOUND_ID,
+                email=email,
+                uuid=profile.get("id"),
+                totalGB=0,
+                expiryTime=0,
+                enable=True,
+                flow=profile.get("flow", ""),
+            )
+            if not add_ok:
+                result["error"] = f"Ошибка добавления клиента {email}"
+                return result
+            result["created"] = True
+            # Применяем ограничение скорости, если есть IP
+            client_ip = profile.get("client_ip")
+            if client_ip:
+                await apply_tc_limit(client_ip)
+        else:
+            # Клиент есть – проверяем subId
+            panel_client = next(c for c in clients if c.get("email") == email)
+            current_sub = panel_client.get("subId", "")
+            if not current_sub:
+                new_subid = secrets.token_hex(16)
+                update_ok = await api.update_client_subid(email, new_subid)
+                if not update_ok:
+                    result["error"] = f"Не удалось обновить subId для {email}"
+                    return result
+                profile["subId"] = new_subid
+                result["updated"] = True
+                logger.info(f"🔄 Обновлён subId для {email} -> {new_subid[:8]}...")
+            else:
+                profile["subId"] = current_sub
+
+    # 3. Сохраняем профиль в БД
+    with Session() as session:
+        db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+        if db_user:
+            db_user.vless_profile_data = json.dumps(profile)
+            db_user.subscription_token = profile.get("subId")
+            if result["created"] or force_create:
+                db_user.subscription_end = datetime.utcnow() + timedelta(days=subscription_days)
+                db_user.is_enabled_in_panel = True
+            session.commit()
+
+    # 4. Ссылка на подписку
+    sub_id = profile.get("subId")
+    if sub_id:
+        result["subscription_link"] = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
+    result["profile"] = profile
+    return result
+
 @router.callback_query(F.data == "admin_promo_stats")
 async def admin_promo_stats_list(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
