@@ -365,6 +365,8 @@ async def sync_user_with_panel(
             return result
 
         settings = safe_json_loads(inbound.get("settings"))
+        if not isinstance(settings, dict):
+            settings = {}
         clients = settings.get("clients", [])
         panel_emails = {c.get("email") for c in clients if c.get("email")}
 
