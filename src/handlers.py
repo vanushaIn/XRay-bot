@@ -745,61 +745,38 @@ async def fix_subids(message: Message):
     await safe_send_message(
         bot=message.bot,
         chat_id=message.from_user.id,
-        text="🔄 Получаю список клиентов из панели..."
+        text="🔄 Синхронизация всех пользователей с панелью..."
     )
-    
-    async with XUIAPI() as api:
-        inbound = await api.get_inbound(config.INBOUND_ID)
-        if not inbound:
-            await safe_send_message(
-                bot=message.bot,
-                chat_id=message.from_user.id,
-                text="❌ Не удалось получить данные inbound"
-            )
-            return
-        
-        settings = inbound.get("settings")
-        if isinstance(settings, str):
-            settings = json.loads(settings)
-        elif not isinstance(settings, dict):
-            settings = {}   # fallback на случай, если пришло что-то неожиданное
-        clients = settings.get("clients", [])
-        
-        updated = 0
-        for client in clients:
-            email = client.get("email")
-            sub_id = client.get("subId", "")
-            if not sub_id and email:
-                new_subid = secrets.token_hex(16)
-                if await api.update_client_subid(email, new_subid):
-                    updated += 1
-                    with Session() as session:
-                        db_user = session.query(User).filter_by(telegram_id=email.split('_')[-1] if email.startswith('user_') else None).first()
-                        if db_user:
-                            db_user.subscription_token = new_subid
-                            if db_user.vless_profile_data:
-                                profile = json.loads(db_user.vless_profile_data)
-                                profile["subId"] = new_subid
-                                db_user.vless_profile_data = json.dumps(profile)
-                            session.commit()
-                    await safe_send_message(
-                        bot=message.bot,
-                        chat_id=message.from_user.id,
-                        text=f"✅ Обновлён {email} -> {new_subid[:8]}..."
-                    )
-                else:
-                    await safe_send_message(
-                        bot=message.bot,
-                        chat_id=message.from_user.id,
-                        text=f"❌ Ошибка обновления {email}"
-                    )
-        
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=f"✅ Готово! Обновлено {updated} клиентов."
-        )
 
+    all_users = await get_all_users()
+    total = len(all_users)
+    created = 0
+    updated = 0
+    errors = 0
+
+    for u in all_users:
+        result = await sync_user_with_panel(u, subscription_days=7)  # или 0 для безлимита
+        if result.get("error"):
+            errors += 1
+            logger.error(f"Ошибка синхронизации {u.telegram_id}: {result['error']}")
+        else:
+            if result.get("created"):
+                created += 1
+            if result.get("updated"):
+                updated += 1
+        await asyncio.sleep(0.2)
+
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text=(
+            f"✅ Синхронизация завершена!\n"
+            f"👥 Всего пользователей: {total}\n"
+            f"🆕 Добавлено клиентов: {created}\n"
+            f"🔄 Обновлено subId: {updated}\n"
+            f"❌ Ошибок: {errors}"
+        )
+    )
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, bot: Bot):
     try:
