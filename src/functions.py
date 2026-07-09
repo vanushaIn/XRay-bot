@@ -195,23 +195,40 @@ class XUIAPI:
             logger.error(f"💥 Исключение при запросе трафика для {email}: {e}")
         return {}
 
-    async def add_client(self, inbound_id: int, client_uuid: str, email: str, total_gb: int = 0, expiry_time: int = 0) -> bool:
-        """Добавление клиента через эндпоинт /panel/api/clients/add"""
+    async def add_client(self, inbound_id: int, email: str, uuid: str = None,
+                        totalGB: int = 0, expiryTime: int = 0,
+                        enable: bool = True, flow: str = "xtls-rprx-vision",
+                        limit_ip: int = 2, tg_id: int = 0, sub_id: str = None) -> bool:
+        """
+        Добавляет клиента через эндпоинт /panel/api/clients/add.
+        Все параметры опциональны, кроме inbound_id и email.
+        """
         try:
             await self._ensure_session()
             url = f"{self.base_url}{self.api_prefix}/clients/add"
-            total_bytes = total_gb * 1024 * 1024 * 1024 if total_gb > 0 else 0
+            
+            # Конвертация трафика из GB в байты
+            total_bytes = totalGB * 1024 * 1024 * 1024 if totalGB > 0 else 0
+
+            # Генерация UUID, если не передан
+            if not uuid:
+                import uuid as uuid_lib
+                uuid = str(uuid_lib.uuid4())
+
+            # Если sub_id не передан, генерируем из части UUID
+            if not sub_id:
+                sub_id = uuid[:16]
 
             client_settings = {
-                "id": client_uuid,
+                "id": uuid,
                 "email": email,
-                "flow": "xtls-rprx-vision",
-                "limitIp": 2,
+                "flow": flow if flow else "xtls-rprx-vision",
+                "limitIp": limit_ip,
                 "totalGB": total_bytes,
-                "expiryTime": expiry_time,
-                "enable": True,
-                "tgId": 0,  # ✅ ПРАВИЛЬНО: число, а не строка
-                "subId": client_uuid[:16]
+                "expiryTime": expiryTime,
+                "enable": enable,
+                "tgId": tg_id,
+                "subId": sub_id
             }
 
             payload = {
