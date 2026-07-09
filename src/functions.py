@@ -55,17 +55,29 @@ class XUIAPI:
             )
             logger.info("✅ Авторизация выполнена через Bearer API Token")
         return True
-    async def find_client_by_email(self, email: str) -> dict:
-        """Ищет клиента по email в инбаунде config.INBOUND_ID"""
+    async def find_client_by_email(self, email: str = None, sub_id: str = None) -> dict:
+        """
+        Ищет клиента в инбаунде по email или subId.
+        Возвращает первый найденный клиент.
+        """
         inbound = await self.get_inbound(config.INBOUND_ID)
         if not inbound:
             return None
-        settings = safe_json_loads(inbound.get("settings"))
+        settings_raw = inbound.get("settings")
+        if isinstance(settings_raw, str):
+            try:
+                settings = json.loads(settings_raw)
+            except:
+                return None
+        else:
+            settings = settings_raw
         if not isinstance(settings, dict):
             return None
         clients = settings.get("clients", [])
         for c in clients:
-            if c.get("email") == email:
+            if email and c.get("email") == email:
+                return c
+            if sub_id and c.get("subId") == sub_id:
                 return c
         return None
     async def _ensure_session(self):

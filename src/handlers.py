@@ -363,7 +363,7 @@ async def sync_user_with_panel(
         panel_emails = {c.get("email") for c in clients if c.get("email")}
 
         # Проверяем, есть ли клиент с таким email в панели
-        client_exists = email in panel_emails
+        client_exists = await api.find_client_by_email(email=email, sub_id=profile.get("subId"))
 
         if not client_exists:
             # Пытаемся добавить клиента
@@ -382,7 +382,7 @@ async def sync_user_with_panel(
                 # Если добавить не удалось, возможно клиент уже есть (дубликат)
                 # Проверим ещё раз, возможно email изменился или есть другой с таким же
                 # Попробуем найти клиента по email через API
-                found_client = await api.find_client_by_email(email)  # новый метод
+                found_client = await api.find_client_by_email(email=email, sub_id=profile.get("subId"))
                 if found_client:
                     logger.info(f"🔍 Клиент {email} найден в панели (вероятно, уже существовал)")
                     client_exists = True
@@ -455,63 +455,59 @@ async def sync_user_with_panel(
 
 @router.message(Command("compare_links"))
 async def compare_links_command(message: Message, bot: Bot):
-    """Сравнивает subId (ссылку подписки) в БД и панели 3X-UI"""
     user = await get_user(message.from_user.id)
     if not user or not user.is_admin:
-        await safe_send_message(
-            bot=bot,
-            chat_id=message.from_user.id,
-            text="⛔ Доступ запрещён"
-        )
+        await safe_send_message(bot, message.from_user.id, "⛔ Доступ запрещён")
         return
 
-    await safe_send_message(
-        bot=bot,
-        chat_id=message.from_user.id,
-        text="🔄 Сравниваю ссылки (subId) в БД и панели..."
-    )
+    await safe_send_message(bot, message.from_user.id, "🔄 Сравниваю ссылки (subId) в БД и панели...")
 
-    # Получаем всех пользователей с профилем
     all_users = await get_all_users()
     users_with_profile = [u for u in all_users if u.vless_profile_data]
 
     if not users_with_profile:
-        await safe_send_message(
-            bot=bot,
-            chat_id=message.from_user.id,
-            text="📭 Нет пользователей с созданным профилем"
-        )
+        await safe_send_message(bot, message.from_user.id, "📭 Нет пользователей с профилем")
         return
 
     async with XUIAPI() as api:
         inbound = await api.get_inbound(config.INBOUND_ID)
         if not inbound:
-            await safe_send_message(
-                bot=bot,
-                chat_id=message.from_user.id,
-                text="❌ Не удалось получить инбаунд из панели"
-            )
+            await safe_send_message(bot, message.from_user.id, "❌ Не удалось получить инбаунд")
             return
         settings = safe_json_loads(inbound.get("settings"))
         if not isinstance(settings, dict):
             settings = {}
         panel_clients = settings.get("clients", [])
-        panel_by_email = {c.get("email"): c for c in panel_clients if c.get("email")}
 
-    mismatches = []          # несовпадающие subId
-    missing_in_panel = []    # есть в БД, нет в панели
+    # Словари: email -> subId, subId -> email (из панели)
+    panel_by_email = {c.get("email"): c for c in panel_clients if c.get("email")}
+    panel_by_subid = {c.get("subId"): c for c in panel_clients if c.get("subId")}
+
+    mismatches = []          # subId не совпадает
+    missing_in_panel = []    # есть в БД, нет в панели (ни по email, ни по subId)
     missing_in_db = []       # есть в панели, нет в БД
+
+    # Собираем subId из БД
+    db_subids = set()
+    db_emails = set()
 
     for db_user in users_with_profile:
         profile = safe_json_loads(db_user.vless_profile_data)
         email = profile.get("email")
-        sub_id = profile.get("subId")
-        if not email:
+        sub_id = profile.get("subId") or db_user.subscription_token
+        if not sub_id:
             continue
+        db_subids.add(sub_id)
+        if email:
+            db_emails.add(email)
 
-        panel_client = panel_by_email.get(email)
+        # Ищем в панели по subId, если нет – по email
+        panel_client = panel_by_subid.get(sub_id)
+        if not panel_client and email:
+            panel_client = panel_by_email.get(email)
+
         if not panel_client:
-            missing_in_panel.append(email)
+            missing_in_panel.append(f"{email or 'без email'} (subId={sub_id})")
             continue
 
         panel_sub = panel_client.get("subId")
@@ -522,29 +518,28 @@ async def compare_links_command(message: Message, bot: Bot):
                 "panel_sub": panel_sub
             })
 
-    # Проверяем клиентов, которых нет в БД
-    db_emails = set()
-    for u in users_with_profile:
-        profile = safe_json_loads(u.vless_profile_data)
-        email = profile.get("email")
-        if email:
-            db_emails.add(email)
-
-    for email in panel_by_email.keys():
-        if email not in db_emails:
-            missing_in_db.append(email)
+    # Ищем клиентов в панели, которых нет в БД
+    for c in panel_clients:
+        email = c.get("email")
+        sub_id = c.get("subId")
+        if sub_id and sub_id in db_subids:
+            continue
+        if email and email in db_emails:
+            continue
+        # Если не нашли ни по subId, ни по email – клиент лишний
+        missing_in_db.append(f"{email} (subId={sub_id})")
 
     # Формируем отчёт
     report = "📊 **Сравнение ссылок (subId):**\n\n"
 
     if missing_in_panel:
         report += f"❌ **Отсутствуют в панели:** {len(missing_in_panel)}\n"
-        for e in missing_in_panel[:10]:
-            report += f"• {e}\n"
+        for item in missing_in_panel[:10]:
+            report += f"• {item}\n"
         if len(missing_in_panel) > 10:
             report += f"... и ещё {len(missing_in_panel)-10}\n"
     else:
-        report += "✅ Все пользователи есть в панели\n"
+        report += "✅ Все пользователи из БД есть в панели\n"
 
     if mismatches:
         report += f"\n⚠️ **Несовпадения subId:** {len(mismatches)}\n"
@@ -557,8 +552,8 @@ async def compare_links_command(message: Message, bot: Bot):
 
     if missing_in_db:
         report += f"\n👤 **Клиенты только в панели (нет в БД):** {len(missing_in_db)}\n"
-        for e in missing_in_db[:10]:
-            report += f"• {e}\n"
+        for item in missing_in_db[:10]:
+            report += f"• {item}\n"
         if len(missing_in_db) > 10:
             report += f"... и ещё {len(missing_in_db)-10}\n"
 
