@@ -415,15 +415,11 @@ async def sync_user_with_panel(
                     result["error"] = f"Не удалось найти клиента {email} в панели"
                     return result
             else:
-                # Если создали, то panel_client уже есть в inbound, но мы его не сохранили
-                # Поэтому перечитываем инбаунд, чтобы получить обновлённый список
-                inbound_updated = await api.get_inbound(config.INBOUND_ID)
-                if inbound_updated:
-                    settings_updated = safe_json_loads(inbound_updated.get("settings"))
-                    clients_updated = settings_updated.get("clients", [])
-                    panel_client = next((c for c in clients_updated if c.get("email") == email), None)
-                else:
-                    panel_client = None
+                # После успешного создания клиента получаем его свежие данные через find_client_by_email
+                panel_client = await api.find_client_by_email(email)
+                if not panel_client:
+                    result["error"] = f"Не удалось найти клиента {email} после создания"
+                    return result
 
             if panel_client:
                 current_sub = panel_client.get("subId", "")
