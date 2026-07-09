@@ -338,10 +338,13 @@ class XUIAPI:
             # Добавляем клиента
             success = await self.add_client(
                 inbound_id=config.INBOUND_ID,
-                client_uuid=client_id,
                 email=email,
-                total_gb=0,
-                expiry_time=0
+                uuid=client_id,
+                totalGB=0,
+                expiryTime=0,
+                enable=True,
+                flow="",
+                sub_id=sub_id
             )
             
             if success:
@@ -379,12 +382,14 @@ class XUIAPI:
             client_id = str(uuid.uuid4())
             
             success = await self.add_client(
-                inbound_id=config.INBOUND_ID,
-                client_uuid=client_id,
-                email=profile_name,
-                total_gb=0,
-                expiry_time=0
-            )
+                 inbound_id=config.INBOUND_ID,
+                    email=profile_name,
+                    uuid=client_id,
+                    totalGB=0,
+                    expiryTime=0,
+                    enable=True,
+                    flow="xtls-rprx-vision"
+                )
             
             if success:
                 return {
