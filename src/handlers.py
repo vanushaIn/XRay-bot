@@ -6,6 +6,7 @@ import secrets
 import uuid
 import sqlite3
 from datetime import datetime, timedelta
+from src.database import Session, User
 from aiogram.exceptions import TelegramForbiddenError
 from database import User, Session, engine  # добавьте engine
 from aiogram import Dispatcher, Router, F, Bot

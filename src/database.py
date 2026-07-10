@@ -8,28 +8,27 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
-# database.py (дополнение)
 
 class PromoCode(Base):
     __tablename__ = 'promocodes'
     id = Column(Integer, primary_key=True)
-    code = Column(String, unique=True, nullable=False)          # уникальный код
-    months = Column(Integer, nullable=False)                     # количество месяцев (1-12)
-    max_uses = Column(Integer, nullable=False)                   # макс. кол-во использований (1 для одноразовых)
-    current_uses = Column(Integer, default=0)                    # сколько раз уже использован
-    is_active = Column(Boolean, default=True)                    # можно деактивировать вручную
+    code = Column(String, unique=True, nullable=False)
+    months = Column(Integer, nullable=False)
+    max_uses = Column(Integer, nullable=False)
+    current_uses = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime, nullable=True)                 # опционально: срок действия промокода
+    expires_at = Column(DateTime, nullable=True)
+
 
 class PromoCodeUse(Base):
     __tablename__ = 'promocode_uses'
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.telegram_id'), nullable=False)  # telegram_id
+    user_id = Column(Integer, ForeignKey('users.telegram_id'), nullable=False)
     promocode_id = Column(Integer, ForeignKey('promocodes.id'), nullable=False)
     used_at = Column(DateTime, default=datetime.utcnow)
-
-    # Уникальность: один пользователь не может использовать один промокод дважды
     __table_args__ = (UniqueConstraint('user_id', 'promocode_id', name='_user_promo_uc'),)
+
 
 class User(Base):
     __tablename__ = 'users'
@@ -44,9 +43,11 @@ class User(Base):
     is_admin = Column(Boolean, default=False)
     notified = Column(Boolean, default=False)
     subscription_token = Column(String, unique=True)
-    happ_install_code = Column(String, nullable=True)  # код от Happ
-    device_limit = Column(Integer, default=1)  # лимит устройств (можно брать из тарифа)
+    happ_install_code = Column(String, nullable=True)
+    device_limit = Column(Integer, default=1)
     is_enabled_in_panel = Column(Boolean, default=True)
+    client_ip = Column(String, nullable=True)
+
 
 class StaticProfile(Base):
     __tablename__ = 'static_profiles'
@@ -55,25 +56,45 @@ class StaticProfile(Base):
     vless_url = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
 engine = create_engine('sqlite:///users.db', echo=False)
 Session = sessionmaker(bind=engine)
 
+
 async def init_db():
+    """Инициализация базы данных"""
     Base.metadata.create_all(engine)
 
-    # Добавляем недостающие колонки в существующую БД (если нужно)
+    # Добавляем недостающие колонки в существующую БД
     try:
         with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE users ADD COLUMN subscription_token VARCHAR"))
-    except Exception:
-        # Колонка уже существует или БД ещё не создана полностью
-        pass
+            # Проверяем существующие колонки
+            columns = conn.execute(text("PRAGMA table_info(users)")).fetchall()
+            col_names = [col[1] for col in columns]
+            
+            # Добавляем недостающие колонки
+            if 'subscription_token' not in col_names:
+                conn.execute(text("ALTER TABLE users ADD COLUMN subscription_token VARCHAR"))
+            if 'happ_install_code' not in col_names:
+                conn.execute(text("ALTER TABLE users ADD COLUMN happ_install_code VARCHAR"))
+            if 'device_limit' not in col_names:
+                conn.execute(text("ALTER TABLE users ADD COLUMN device_limit INTEGER DEFAULT 1"))
+            if 'client_ip' not in col_names:
+                conn.execute(text("ALTER TABLE users ADD COLUMN client_ip VARCHAR"))
+            if 'is_enabled_in_panel' not in col_names:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_enabled_in_panel BOOLEAN DEFAULT 1"))
+                
+            logger.info("✅ Database tables updated")
+    except Exception as e:
+        logger.warning(f"⚠️ User table update warning: {e}")
 
     logger.info("✅ Database tables created")
+
 
 async def get_user(telegram_id: int):
     with Session() as session:
         return session.query(User).filter_by(telegram_id=telegram_id).first()
+
 
 async def create_user(telegram_id: int, full_name: str, username: str = None, is_admin: bool = False):
     with Session() as session:
@@ -90,6 +111,7 @@ async def create_user(telegram_id: int, full_name: str, username: str = None, is
         logger.info(f"✅ New user created: {telegram_id}")
         return user
 
+
 async def delete_user_profile(telegram_id: int):
     with Session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
@@ -99,25 +121,24 @@ async def delete_user_profile(telegram_id: int):
             session.commit()
             logger.info(f"✅ User profile deleted: {telegram_id}")
 
+
 async def update_subscription(telegram_id: int, months: int):
     """Обновляет подписку с учетом текущего состояния"""
     with Session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
             now = datetime.utcnow()
-            # Если подписка активна, добавляем к текущей дате окончания
-            if user.subscription_end > now:
+            if user.subscription_end and user.subscription_end > now:
                 user.subscription_end += timedelta(days=months * 30)
             else:
-                # Если подписка истекла, начинаем с текущей даты
                 user.subscription_end = now + timedelta(days=months * 30)
             
-            # Сбрасываем флаг уведомления
             user.notified = False
             session.commit()
             logger.info(f"✅ Subscription updated for {telegram_id}: +{months} months")
             return True
         return False
+
 
 async def get_all_users(with_subscription: bool = None):
     with Session() as session:
@@ -129,6 +150,7 @@ async def get_all_users(with_subscription: bool = None):
                 query = query.filter(User.subscription_end <= datetime.utcnow())
         return query.all()
 
+
 async def create_static_profile(name: str, vless_url: str):
     with Session() as session:
         profile = StaticProfile(name=name, vless_url=vless_url)
@@ -137,9 +159,11 @@ async def create_static_profile(name: str, vless_url: str):
         logger.info(f"✅ Static profile created: {name}")
         return profile
 
+
 async def get_static_profiles():
     with Session() as session:
         return session.query(StaticProfile).all()
+
 
 async def get_user_stats():
     with Session() as session:
