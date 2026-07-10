@@ -1260,7 +1260,8 @@ async def sync_db_to_panel_command(message: Message):
                 # 1. Обновляем subId (обрезаем до 16 символов, как в панели)
                 db_subid = profile.get("subId") or user.subscription_token
                 if db_subid:
-                    panel_subid = db_subid[:16]
+                    # Вместо panel_subid = db_subid[:16]
+                    panel_subid = db_subid  # Используем как есть
                     await api.update_client_subid(email, panel_subid)
 
                 # 2. Обновляем enable (вкл/выкл)
