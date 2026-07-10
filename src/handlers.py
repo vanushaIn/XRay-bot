@@ -7,8 +7,8 @@ import uuid
 import sqlite3
 from typing import Dict, Any
 from datetime import datetime, timedelta
-from aiogram.exceptions import TelegramForbiddenError
 
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.filters import Command, StateFilter
@@ -45,13 +45,10 @@ from promo import (
     list_promocodes
 )
 
-
-
 logger = logging.getLogger(__name__)
-
 router = Router()
-
 MAX_MESSAGE_LENGTH = 4096
+
 
 class AdminPromoStates(StatesGroup):
     choosing_type = State()
@@ -59,6 +56,7 @@ class AdminPromoStates(StatesGroup):
     entering_max_uses = State()
     entering_custom_code = State()
     confirming = State()
+
 
 class AdminStates(StatesGroup):
     ADD_TIME = State()
@@ -71,14 +69,14 @@ class AdminStates(StatesGroup):
     REMOVE_TIME_AMOUNT = State()
     SEND_MESSAGE_TARGET = State()
 
+
 class PromoStates(StatesGroup):
     waiting_for_code = State()
 
+
 def split_text(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list:
-    """Разбивает текст на части указанной максимальной длины"""
     if len(text) <= max_length:
         return [text]
-
     parts = []
     while text:
         if len(text) <= max_length:
@@ -92,16 +90,13 @@ def split_text(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list:
         text = text[len(part):].lstrip()
     return parts
 
+
+# ---------- Безопасные обёртки для отправки сообщений ----------
 async def safe_send_message(bot: Bot, chat_id: int, text: str, **kwargs):
-    """
-    Безопасная отправка сообщения с обработкой блокировки бота пользователем.
-    Если пользователь заблокировал бота - отключаем клиента в панели.
-    """
     try:
         return await bot.send_message(chat_id, text, **kwargs)
     except TelegramForbiddenError:
         logger.warning(f"⚠️ Бот заблокирован пользователем {chat_id}, отключаем клиента")
-        # Отключаем клиента в панели
         user = await get_user(chat_id)
         if user and user.vless_profile_data:
             profile_data = safe_json_loads(user.vless_profile_data)
@@ -118,14 +113,12 @@ async def safe_send_message(bot: Bot, chat_id: int, text: str, **kwargs):
         logger.error(f"Ошибка отправки сообщения {chat_id}: {e}")
         return None
 
+
 async def safe_edit_message(bot: Bot, chat_id: int, message_id: int, text: str, **kwargs):
-    """
-    Безопасное редактирование сообщения с обработкой блокировки бота пользователем.
-    """
     try:
         return await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, **kwargs)
     except TelegramForbiddenError:
-        logger.warning(f"⚠️ Бот заблокирован пользователем {chat_id} при редактировании, отключаем клиента")
+        logger.warning(f"⚠️ Бот заблокирован пользователем {chat_id} при редактировании")
         user = await get_user(chat_id)
         if user and user.vless_profile_data:
             profile_data = safe_json_loads(user.vless_profile_data)
@@ -142,10 +135,8 @@ async def safe_edit_message(bot: Bot, chat_id: int, message_id: int, text: str, 
         logger.error(f"Ошибка редактирования сообщения {chat_id}: {e}")
         return None
 
+
 async def safe_answer_callback(callback: CallbackQuery, text: str = None, **kwargs):
-    """
-    Безопасный ответ на callback с обработкой блокировки.
-    """
     try:
         if text is not None:
             return await callback.answer(text, **kwargs)
@@ -168,20 +159,20 @@ async def safe_answer_callback(callback: CallbackQuery, text: str = None, **kwar
         logger.error(f"Ошибка callback ответа: {e}")
         return None
 
+
 async def notify_admins(bot: Bot, text: str, parse_mode: str = "Markdown"):
-    """Отправляет уведомление всем администраторам с обработкой ошибок"""
     for admin_id in config.ADMINS:
         await safe_send_message(bot, admin_id, text, parse_mode=parse_mode)
 
+
+# ---------- Главное меню ----------
 async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
-    """Функция для отображения меню"""
     user = await get_user(chat_id)
     if not user:
         return
 
     status = "Активна" if user.subscription_end and user.subscription_end > datetime.utcnow() else "Истекла"
-    expire_date = user.subscription_end.strftime(
-        "%d-%m-%Y %H:%M") if status == "Активна" else status
+    expire_date = user.subscription_end.strftime("%d-%m-%Y %H:%M") if status == "Активна" else status
 
     text = (
         f"**Имя профиля**: `{user.full_name}`\n"
@@ -199,7 +190,6 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     builder.button(text="👥 Рефералы", callback_data="ref_program")
     builder.button(text="ℹ️ Помощь", callback_data="help")
     builder.button(text="🎫 Активировать промокод", callback_data="activate_promo")
-
     if user.is_admin:
         builder.button(text="⚠️ Админ. меню", callback_data="admin_menu")
 
@@ -223,6 +213,8 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
             parse_mode='Markdown'
         )
 
+
+# ---------- Команда /start ----------
 @router.message(Command("start"))
 async def start_cmd(message: Message, bot: Bot):
     logger.info(f"ℹ️ Start command from {message.from_user.id}")
@@ -236,9 +228,7 @@ async def start_cmd(message: Message, bot: Bot):
             referrer_id = None
 
     user = await get_user(message.from_user.id)
-
     update_data = {}
-    is_new_user = False
     if user:
         if user.full_name != message.from_user.full_name:
             update_data["full_name"] = message.from_user.full_name
@@ -252,7 +242,6 @@ async def start_cmd(message: Message, bot: Bot):
             username=message.from_user.username,
             is_admin=is_admin
         )
-        is_new_user = True
         await safe_send_message(
             bot,
             message.from_user.id,
@@ -267,7 +256,6 @@ async def start_cmd(message: Message, bot: Bot):
             if ref_user:
                 await update_subscription(message.from_user.id, 1)
                 await update_subscription(referrer_id, 1)
-
                 suffix = "месяц"
                 await safe_send_message(
                     bot,
@@ -294,17 +282,15 @@ async def start_cmd(message: Message, bot: Bot):
 
     await show_menu(bot, message.from_user.id)
 
+
 @router.message(Command("ref"))
 async def referral_cmd(message: Message, bot: Bot):
-    """Отправляет пользователю его реферальную ссылку"""
     user = await get_user(message.from_user.id)
     if not user:
         await start_cmd(message, bot)
         return
-
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
-
     text = (
         "👥 **Реферальная программа**\n\n"
         "За каждого друга, который запустит бота по вашей ссылке, "
@@ -313,17 +299,115 @@ async def referral_cmd(message: Message, bot: Bot):
     )
     await safe_send_message(message.from_user.id, text, parse_mode="Markdown")
 
-import secrets
-import json
-from datetime import datetime, timedelta
-from typing import Dict, Any
-from loguru import logger
-from sqlalchemy.orm import Session
 
-# Предполагаем, что эти функции уже импортированы из других модулей
-# from functions import create_vless_profile, safe_json_loads, XUIAPI, apply_tc_limit, enable_client_by_email
-# from database import User, Session, get_all_users
+# ---------- Синхронизация пользователя с панелью ----------
+async def sync_user_with_panel(
+    user,
+    subscription_days: int = 7,
+    force_create: bool = False,
+) -> Dict[str, Any]:
+    """Синхронизирует одного пользователя с панелью: создаёт/обновляет клиента и subId."""
+    result = {
+        "profile": None,
+        "subscription_link": None,
+        "created": False,
+        "updated": False,
+        "error": None,
+    }
 
+    profile = safe_json_loads(user.vless_profile_data)
+    if not profile or force_create:
+        profile = await create_vless_profile(user.telegram_id, subscription_days=subscription_days)
+        if not profile:
+            result["error"] = "Не удалось создать профиль"
+            return result
+        logger.info(f"📝 Создан новый профиль для user {user.telegram_id}")
+
+    email = profile.get("email")
+    if not email:
+        email = f"user_{user.telegram_id}"
+        profile["email"] = email
+
+    async with XUIAPI() as api:
+        inbound = await api.get_inbound(config.INBOUND_ID)
+        if not inbound:
+            result["error"] = "Не удалось получить инбаунд"
+            return result
+
+        settings = safe_json_loads(inbound.get("settings"))
+        if not isinstance(settings, dict):
+            settings = {}
+
+        clients = settings.get("clients", [])
+        panel_client = None
+        for c in clients:
+            if c.get("email") == email or c.get("subId") == profile.get("subId"):
+                panel_client = c
+                break
+
+        if not panel_client:
+            logger.info(f"➕ Добавляем клиента {email} в инбаунд")
+            add_ok = await api.add_client(
+                inbound_id=config.INBOUND_ID,
+                client_uuid=profile.get("client_id"),
+                email=email,
+                total_gb=0,
+                expiry_time=0,
+                enable=True,
+                flow=profile.get("flow", "xtls-rprx-vision"),
+                sub_id=profile.get("subId")
+            )
+            if not add_ok:
+                result["error"] = f"Ошибка добавления клиента {email}"
+                return result
+            result["created"] = True
+            client_ip = profile.get("client_ip")
+            if client_ip:
+                try:
+                    await apply_tc_limit(client_ip)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка применения tc limit для {client_ip}: {e}")
+            # обновляем список клиентов, чтобы получить panel_client
+            inbound = await api.get_inbound(config.INBOUND_ID)
+            settings = safe_json_loads(inbound.get("settings"))
+            clients = settings.get("clients", [])
+            for c in clients:
+                if c.get("email") == email:
+                    panel_client = c
+                    break
+
+        if panel_client:
+            current_sub = panel_client.get("subId", "")
+            if not current_sub:
+                new_subid = secrets.token_hex(16)
+                update_ok = await api.update_client_subid(email, new_subid)
+                if not update_ok:
+                    result["error"] = f"Не удалось обновить subId для {email}"
+                    return result
+                profile["subId"] = new_subid
+                result["updated"] = True
+                logger.info(f"🔄 Обновлён subId для {email} -> {new_subid[:8]}...")
+            else:
+                profile["subId"] = current_sub
+
+    with Session() as session:
+        db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+        if db_user:
+            db_user.vless_profile_data = json.dumps(profile)
+            db_user.subscription_token = profile.get("subId")
+            if result["created"] or force_create:
+                db_user.subscription_end = datetime.utcnow() + timedelta(days=subscription_days)
+                db_user.is_enabled_in_panel = True
+            session.commit()
+
+    sub_id = profile.get("subId")
+    if sub_id:
+        result["subscription_link"] = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
+    result["profile"] = profile
+    return result
+
+
+# ---------- Команда /fix_subids ----------
 @router.message(Command("fix_subids"))
 async def fix_subids(message: Message):
     user = await get_user(message.from_user.id)
@@ -370,6 +454,9 @@ async def fix_subids(message: Message):
             f"❌ Ошибок: {errors}"
         )
     )
+
+
+# ---------- Команда /compare_links ----------
 @router.message(Command("compare_links"))
 async def compare_links_command(message: Message, bot: Bot):
     user = await get_user(message.from_user.id)
@@ -481,6 +568,7 @@ async def compare_links_command(message: Message, bot: Bot):
         parse_mode="Markdown"
     )
 
+
 @router.callback_query(F.data == "fix_mismatches")
 async def fix_mismatches(callback: CallbackQuery, bot: Bot):
     await safe_answer_callback(callback, "🔧 Запускаю синхронизацию...")
@@ -494,6 +582,8 @@ async def fix_mismatches(callback: CallbackQuery, bot: Bot):
     )
     await fix_subids(fake_message)
 
+
+# ---------- Промокоды ----------
 @router.callback_query(F.data == "admin_promo_stats")
 async def admin_promo_stats_list(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
@@ -536,32 +626,6 @@ async def admin_promo_stats_list(callback: CallbackQuery):
         parse_mode="Markdown"
     )
 
-@router.callback_query(F.data == "ref_program")
-async def referral_program_callback(callback: CallbackQuery, bot: Bot):
-    """Кнопка реферальной программы в меню"""
-    await safe_answer_callback(callback)
-    user = await get_user(callback.from_user.id)
-    if not user:
-        fake_message = Message(
-            message_id=callback.message.message_id,
-            date=callback.message.date,
-            chat=callback.message.chat,
-            from_user=callback.from_user,
-            text="/start"
-        )
-        await start_cmd(fake_message, bot)
-        return
-
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
-
-    text = (
-        "👥 **Реферальная программа**\n\n"
-        "За каждого друга, который запустит бота по вашей ссылке, "
-        "вы и он получаете по **1 месяц** VPN.\n\n"
-        f"Ваша персональная ссылка:\n`{link}`"
-    )
-    await safe_send_message(callback.from_user.id, text, parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("promo_detail_"))
 async def admin_promo_detail(callback: CallbackQuery):
@@ -620,28 +684,134 @@ async def admin_promo_detail(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-@router.message(Command("menu"))
-async def menu_cmd(message: Message, bot: Bot):
+
+@router.message(Command("listpromo"))
+async def list_promo_cmd(message: Message):
     user = await get_user(message.from_user.id)
-    if not user:
-        await start_cmd(message, bot)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён"
+        )
         return
 
-    update_data = {}
-    if user.full_name != message.from_user.full_name:
-        update_data["full_name"] = message.from_user.full_name
-    if user.username != message.from_user.username:
-        update_data["username"] = message.from_user.username
+    promos = await list_promocodes()
+    if not promos:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="📭 Промокодов пока нет"
+        )
+        return
 
-    if update_data:
-        with Session() as session:
-            db_user = session.query(User).get(user.id)
-            for key, value in update_data.items():
-                setattr(db_user, key, value)
-            session.commit()
-            logger.info(f"🔄 Updated user data in menu: {message.from_user.id}")
+    text = "**📋 Список промокодов:**\n\n"
+    for p in promos:
+        status = "✅ Активен" if p.is_active else "❌ Неактивен"
+        expires = f", истекает {p.expires_at.strftime('%d.%m.%Y')}" if p.expires_at else ""
+        text += (
+            f"`{p.code}` — {p.months} мес., "
+            f"использовано {p.current_uses}/{p.max_uses}, {status}{expires}\n"
+        )
+    parts = split_text(text, MAX_MESSAGE_LENGTH)
+    for part in parts:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=part,
+            parse_mode="Markdown"
+        )
 
-    await show_menu(bot, message.from_user.id)
+
+@router.message(Command("use"))
+async def use_promo_cmd(message: Message):
+    args = message.text.split()
+    if len(args) != 2:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Использование: /use <код>"
+        )
+        return
+    code = args[1].strip()
+    success, msg = await activate_promo_code(message.from_user.id, code)
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text=msg
+    )
+
+
+@router.message(Command("addpromo"))
+async def add_promo_cmd(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён"
+        )
+        return
+
+    args = message.text.split()
+    if len(args) < 3:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Использование: /addpromo <месяцы> <макс_использований> [код]"
+        )
+        return
+
+    try:
+        months = int(args[1])
+        max_uses = int(args[2])
+    except ValueError:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Месяцы и макс. использования должны быть числами"
+        )
+        return
+
+    if not (1 <= months <= 12):
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Месяцы должны быть от 1 до 12"
+        )
+        return
+    if max_uses < 1:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Макс. использования должно быть >= 1"
+        )
+        return
+
+    code = args[3] if len(args) >= 4 else None
+
+    try:
+        promo = await create_promo_code(months, max_uses, code)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"✅ Промокод создан!\nКод: `{promo.code}`\nМесяцев: {promo.months}\nИспользований: {promo.current_uses}/{promo.max_uses}",
+            parse_mode="Markdown"
+        )
+    except ValueError as e:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Error creating promo: {e}")
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Внутренняя ошибка"
+        )
+
 
 @router.callback_query(F.data == "activate_promo")
 async def activate_promo_start(callback: CallbackQuery, state: FSMContext):
@@ -656,6 +826,7 @@ async def activate_promo_start(callback: CallbackQuery, state: FSMContext):
         reply_markup=cancel_kb
     )
     await state.set_state(PromoStates.waiting_for_code)
+
 
 @router.message(PromoStates.waiting_for_code)
 async def process_promo_code(message: Message, state: FSMContext, bot: Bot):
@@ -684,8 +855,8 @@ async def process_promo_code(message: Message, state: FSMContext, bot: Bot):
             reply_markup=cancel_kb
         )
         return
+    await state.clear()
 
-    await state.finish()
 
 @router.callback_query(F.data == "cancel_promo", StateFilter(PromoStates.waiting_for_code))
 async def cancel_promo_input(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -696,39 +867,20 @@ async def cancel_promo_input(callback: CallbackQuery, state: FSMContext, bot: Bo
         message_id=callback.message.message_id,
         text="⛔ Ввод промокода отменён."
     )
-    await state.finish()
+    await state.clear()
     await show_menu(bot, callback.from_user.id, callback.message.message_id)
 
-@router.callback_query(F.data == "help")
-async def help_msg(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⬅️ Назад", callback_data="back_to_menu")
-    text = (
-        f"О боте:\n"
-        "<b>Разработчик:</b>\n"
-        "@Vanusha_in\n"
-        "<i>Обращайтесь если вы хотите настроить собственный vpn или у вас возникла проблема</i>\n"
-    )
-    await safe_send_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        text=text,
-        parse_mode='HTML',
-        reply_markup=builder.as_markup()
-    )
 
+# ---------- Оплата ----------
 @router.callback_query(F.data == "renew_sub")
 async def renew_subscription(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-
     for months in sorted(config.STARS_PRICES.keys()):
         stars_price = config.calculate_stars_price(months)
         if stars_price <= 0:
             continue
         button_text = f"⭐ {months} мес. - {stars_price} звёзд"
         builder.button(text=button_text, callback_data=f"pay_star_{months}")
-
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(1)
 
@@ -741,17 +893,6 @@ async def renew_subscription(callback: CallbackQuery):
         parse_mode='Markdown'
     )
 
-@router.callback_query(F.data == "compare_links")
-async def compare_links_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    fake_message = Message(
-        message_id=callback.message.message_id,
-        date=callback.message.date,
-        chat=callback.message.chat,
-        from_user=callback.from_user,
-        text="/compare_links"
-    )
-    await compare_links_command(fake_message, callback.bot)
 
 @router.callback_query(F.data == "crypto_payment")
 async def crypto_payment_info(callback: CallbackQuery):
@@ -766,6 +907,7 @@ async def crypto_payment_info(callback: CallbackQuery):
         text=text,
         parse_mode="Markdown"
     )
+
 
 @router.callback_query(F.data.startswith("pay_star_"))
 async def process_stars_payment(callback: CallbackQuery, bot: Bot):
@@ -811,56 +953,12 @@ async def process_stars_payment(callback: CallbackQuery, bot: Bot):
             text="❌ Ошибка при создании счета на оплату звёздами"
         )
 
+
 @router.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-@router.message(Command("fix_subids"))
-async def fix_subids(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user or not user.is_admin:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="⛔ Доступ запрещён"
-        )
-        return
 
-    await safe_send_message(
-        bot=message.bot,
-        chat_id=message.from_user.id,
-        text="🔄 Синхронизация всех пользователей с панелью..."
-    )
-
-    all_users = await get_all_users()
-    total = len(all_users)
-    created = 0
-    updated = 0
-    errors = 0
-
-    for u in all_users:
-        result = await sync_user_with_panel(u, subscription_days=7)  # или 0 для безлимита
-        if result.get("error"):
-            errors += 1
-            logger.error(f"Ошибка синхронизации {u.telegram_id}: {result['error']}")
-        else:
-            if result.get("created"):
-                created += 1
-            if result.get("updated"):
-                updated += 1
-        await asyncio.sleep(0.2)
-
-    await safe_send_message(
-        bot=message.bot,
-        chat_id=message.from_user.id,
-        text=(
-            f"✅ Синхронизация завершена!\n"
-            f"👥 Всего пользователей: {total}\n"
-            f"🆕 Добавлено клиентов: {created}\n"
-            f"🔄 Обновлено subId: {updated}\n"
-            f"❌ Ошибок: {errors}"
-        )
-    )
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, bot: Bot):
     try:
@@ -977,6 +1075,52 @@ async def process_successful_payment(message: Message, bot: Bot):
             text="❌ Ошибка при обработке платежа"
         )
 
+
+# ---------- Меню ----------
+@router.message(Command("menu"))
+async def menu_cmd(message: Message, bot: Bot):
+    user = await get_user(message.from_user.id)
+    if not user:
+        await start_cmd(message, bot)
+        return
+
+    update_data = {}
+    if user.full_name != message.from_user.full_name:
+        update_data["full_name"] = message.from_user.full_name
+    if user.username != message.from_user.username:
+        update_data["username"] = message.from_user.username
+    if update_data:
+        with Session() as session:
+            db_user = session.query(User).get(user.id)
+            for key, value in update_data.items():
+                setattr(db_user, key, value)
+            session.commit()
+            logger.info(f"🔄 Updated user data in menu: {message.from_user.id}")
+
+    await show_menu(bot, message.from_user.id)
+
+
+@router.callback_query(F.data == "help")
+async def help_msg(callback: CallbackQuery):
+    await safe_answer_callback(callback)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад", callback_data="back_to_menu")
+    text = (
+        f"О боте:\n"
+        "<b>Разработчик:</b>\n"
+        "@Vanusha_in\n"
+        "<i>Обращайтесь если вы хотите настроить собственный vpn или у вас возникла проблема</i>\n"
+    )
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text=text,
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+
+
+# ---------- Админ-меню ----------
 @router.callback_query(F.data == "admin_menu")
 async def admin_menu(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
@@ -998,7 +1142,7 @@ async def admin_menu(callback: CallbackQuery):
     builder.button(text="+ время", callback_data="admin_add_time")
     builder.button(text="- время", callback_data="admin_remove_time")
     builder.button(text="📋 Список пользователей", callback_data="admin_user_list")
-    builder.button(text="📋 Не подключившиеся", callback_data="admin_inactive_users_list")  # Новая кнопка
+    builder.button(text="📋 Не подключившиеся", callback_data="admin_inactive_users_list")
     builder.button(text="📊 Статистика исп. сети", callback_data="admin_network_stats")
     builder.button(text="📢 Рассылка", callback_data="admin_send_message")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
@@ -1016,6 +1160,21 @@ async def admin_menu(callback: CallbackQuery):
         parse_mode='Markdown'
     )
 
+
+@router.callback_query(F.data == "compare_links")
+async def compare_links_callback(callback: CallbackQuery):
+    await safe_answer_callback(callback)
+    fake_message = Message(
+        message_id=callback.message.message_id,
+        date=callback.message.date,
+        chat=callback.message.chat,
+        from_user=callback.from_user,
+        text="/compare_links"
+    )
+    await compare_links_command(fake_message, callback.bot)
+
+
+# ---------- Админ: изменение времени ----------
 @router.callback_query(F.data == "admin_add_time")
 async def admin_add_time_start(callback: CallbackQuery, state: FSMContext):
     await safe_answer_callback(callback)
@@ -1025,6 +1184,7 @@ async def admin_add_time_start(callback: CallbackQuery, state: FSMContext):
         text="Введите Telegram ID пользователя:"
     )
     await state.set_state(AdminStates.ADD_TIME_USER)
+
 
 @router.message(AdminStates.ADD_TIME_USER)
 async def admin_add_time_user(message: Message, state: FSMContext):
@@ -1044,6 +1204,7 @@ async def admin_add_time_user(message: Message, state: FSMContext):
             text="Ошибка: ID должен быть числом"
         )
 
+
 @router.message(AdminStates.ADD_TIME_AMOUNT)
 async def admin_add_time_amount(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -1054,7 +1215,7 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text="Ошибка: нужно ввести 4 числа"
+            text="Ошибка: нужно ввести 4 числа (Месяцы Дни Часы Минуты)"
         )
         return
 
@@ -1069,47 +1230,49 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
 
         with Session() as session:
             user = session.query(User).filter_by(telegram_id=user_id).first()
-            if user:
-                now = datetime.utcnow()
-                if user.subscription_end and user.subscription_end > now:
-                    user.subscription_end += timedelta(seconds=total_seconds)
-                else:
-                    user.subscription_end = now + timedelta(seconds=total_seconds)
-                session.commit()
-                if user and user.vless_profile_data:
-                    profile = json.loads(user.vless_profile_data)
-                    email = profile.get("email")
-                    if email and user.subscription_end:
-                        api_updater = XUIAPI()
-                        with Session() as session:
-                            db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                            if db_user and db_user.is_enabled_in_panel == False:
-                                db_user.is_enabled_in_panel = True
-                                session.commit()
-                        try:
-                            if await api_updater.login():
-                                await api_updater.enable_client(email)
-                        finally:
-                            await api_updater.close()
-                await safe_send_message(
-                    bot=message.bot,
-                    chat_id=message.from_user.id,
-                    text=f"✅ Добавлено время пользователю {user_id}"
-                )
-            else:
+            if not user:
                 await safe_send_message(
                     bot=message.bot,
                     chat_id=message.from_user.id,
                     text="❌ Пользователь не найден"
                 )
-    except Exception as e:
+                return
+
+            now = datetime.utcnow()
+            if user.subscription_end and user.subscription_end > now:
+                user.subscription_end += timedelta(seconds=total_seconds)
+            else:
+                user.subscription_end = now + timedelta(seconds=total_seconds)
+
+            if user.vless_profile_data:
+                try:
+                    profile = json.loads(user.vless_profile_data)
+                    email = profile.get("email")
+                    if email:
+                        async with XUIAPI() as api:
+                            await api.enable_client(email)
+                        user.is_enabled_in_panel = True
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось включить клиента: {e}")
+
+            session.commit()
+
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text=f"Ошибка: {str(e)}"
+            text=f"✅ Добавлено время пользователю {user_id}"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления времени: {e}", exc_info=True)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка: {str(e)}"
         )
     finally:
         await state.clear()
+
 
 @router.callback_query(F.data == "admin_remove_time")
 async def admin_remove_time_start(callback: CallbackQuery, state: FSMContext):
@@ -1120,6 +1283,7 @@ async def admin_remove_time_start(callback: CallbackQuery, state: FSMContext):
         text="Введите Telegram ID пользователя:"
     )
     await state.set_state(AdminStates.REMOVE_TIME_USER)
+
 
 @router.message(AdminStates.REMOVE_TIME_USER)
 async def admin_remove_time_user(message: Message, state: FSMContext):
@@ -1139,6 +1303,7 @@ async def admin_remove_time_user(message: Message, state: FSMContext):
             text="Ошибка: ID должен быть числом"
         )
 
+
 @router.message(AdminStates.REMOVE_TIME_AMOUNT)
 async def admin_remove_time_amount(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -1149,7 +1314,7 @@ async def admin_remove_time_amount(message: Message, state: FSMContext):
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text="Ошибка: нужно ввести 4 числа"
+            text="Ошибка: нужно ввести 4 числа (Месяцы Дни Часы Минуты)"
         )
         return
 
@@ -1164,66 +1329,54 @@ async def admin_remove_time_amount(message: Message, state: FSMContext):
 
         with Session() as session:
             user = session.query(User).filter_by(telegram_id=user_id).first()
-            if user:
-                now = datetime.utcnow()
-                if user.subscription_end:
-                    new_end = user.subscription_end - timedelta(seconds=total_seconds)
-                    if new_end < now:
-                        new_end = now
-                else:
-                    new_end = now
-                user.subscription_end = new_end
-                session.commit()
-                if user and user.vless_profile_data:
-                    profile = json.loads(user.vless_profile_data)
-                    email = profile.get("email")
-                    if email and user.subscription_end:
-                        expiry_ms = int(user.subscription_end.timestamp() * 1000)
-                        api_updater = XUIAPI()
-                        try:
-                            if await api_updater.login():
-                                await api_updater.update_client_expiry(email, expiry_ms)
-                        finally:
-                            await api_updater.close()
-                await safe_send_message(
-                    bot=message.bot,
-                    chat_id=message.from_user.id,
-                    text=f"✅ Удалено время у пользователя {user_id}"
-                )
-            else:
+            if not user:
                 await safe_send_message(
                     bot=message.bot,
                     chat_id=message.from_user.id,
                     text="❌ Пользователь не найден"
                 )
-    except Exception as e:
+                return
+
+            now = datetime.utcnow()
+            if user.subscription_end:
+                new_end = user.subscription_end - timedelta(seconds=total_seconds)
+                if new_end < now:
+                    new_end = now
+            else:
+                new_end = now
+            user.subscription_end = new_end
+
+            if user.vless_profile_data:
+                try:
+                    profile = json.loads(user.vless_profile_data)
+                    email = profile.get("email")
+                    if email and user.subscription_end:
+                        expiry_ms = int(user.subscription_end.timestamp() * 1000)
+                        async with XUIAPI() as api:
+                            await api.update_client_expiry(email, expiry_ms)
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось обновить expiry в панели: {e}")
+
+            session.commit()
+
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text=f"Ошибка: {str(e)}"
+            text=f"✅ Удалено время у пользователя {user_id}"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления времени: {e}", exc_info=True)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка: {str(e)}"
         )
     finally:
         await state.clear()
 
-@router.message(Command("use"))
-async def use_promo_cmd(message: Message):
-    args = message.text.split()
-    if len(args) != 2:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="Использование: /use <код>"
-        )
-        return
 
-    code = args[1].strip()
-    success, msg = await activate_promo_code(message.from_user.id, code)
-    await safe_send_message(
-        bot=message.bot,
-        chat_id=message.from_user.id,
-        text=msg
-    )
-
+# ---------- Админ: список пользователей ----------
 @router.callback_query(F.data == "admin_user_list")
 async def admin_user_list(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
@@ -1241,6 +1394,7 @@ async def admin_user_list(callback: CallbackQuery):
         parse_mode='Markdown'
     )
 
+
 @router.callback_query(F.data == "user_list_active")
 async def handle_user_list_active(callback: CallbackQuery):
     users = await get_all_users(with_subscription=True)
@@ -1254,7 +1408,6 @@ async def handle_user_list_active(callback: CallbackQuery):
         expire_date = user.subscription_end.strftime("%d.%m.%Y %H:%M")
         username = f"@{user.username}" if user.username else "none"
         user_line = f"• {user.full_name} ({username} | <code>{user.telegram_id}</code>) - до <code>{expire_date}</code>\n"
-
         if len(text) + len(user_line) > MAX_MESSAGE_LENGTH:
             await safe_send_message(
                 bot=callback.bot,
@@ -1263,15 +1416,14 @@ async def handle_user_list_active(callback: CallbackQuery):
                 parse_mode="HTML"
             )
             text = "👤 <b>Пользователи с активной подпиской (продолжение):</b>\n\n"
-
         text += user_line
-
     await safe_send_message(
         bot=callback.bot,
         chat_id=callback.from_user.id,
         text=text,
         parse_mode="HTML"
     )
+
 
 @router.callback_query(F.data == "user_list_inactive")
 async def handle_user_list_inactive(callback: CallbackQuery):
@@ -1285,7 +1437,6 @@ async def handle_user_list_inactive(callback: CallbackQuery):
     for user in users:
         username = f"@{user.username}" if user.username else "none"
         user_line = f"• {user.full_name} ({username} | <code>{user.telegram_id}</code>)\n"
-
         if len(text) + len(user_line) > MAX_MESSAGE_LENGTH:
             await safe_send_message(
                 bot=callback.bot,
@@ -1294,9 +1445,7 @@ async def handle_user_list_inactive(callback: CallbackQuery):
                 parse_mode="HTML"
             )
             text = "👤 <b>Пользователи без подписки (продолжение):</b>\n\n"
-
         text += user_line
-
     await safe_send_message(
         bot=callback.bot,
         chat_id=callback.from_user.id,
@@ -1304,60 +1453,134 @@ async def handle_user_list_inactive(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-@router.callback_query(AdminPromoStates.choosing_type, F.data.in_({"promo_type_single", "promo_type_multi"}))
-async def admin_promo_choose_type(callback: CallbackQuery, state: FSMContext):
+
+# ---------- Админ: статистика сети ----------
+@router.callback_query(F.data == "admin_network_stats")
+async def network_stats(callback: CallbackQuery):
+    stats = await get_global_stats()
+    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
+    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
+    if upload_size == "GB":
+        upload = f"{int(float(upload) / 1024):.2f}"
+    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
+    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
+    if download_size == "GB":
+        download = f"{int(float(download) / 1024):.2f}"
+
     await safe_answer_callback(callback)
-    promo_type = "single" if callback.data == "promo_type_single" else "multi"
-    await state.update_data(promo_type=promo_type)
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
     await safe_edit_message(
         bot=callback.bot,
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
-        text="🗓 Введите количество месяцев (от 1 до 12):",
-        reply_markup=builder.as_markup()
+        text=f"📊 **Статистика использования сети:**\n\n🔼 Upload - `{upload} {upload_size}` | 🔽 Download - `{download} {download_size}`",
+        parse_mode='Markdown'
     )
-    await state.set_state(AdminPromoStates.entering_months)
 
-@router.message(Command("listpromo"))
-async def list_promo_cmd(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user or not user.is_admin:
+
+# ---------- Админ: статические профили ----------
+@router.callback_query(F.data == "static_profiles_menu")
+async def static_profiles_menu(callback: CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆕 Добавить статический профиль", callback_data="static_profile_add")
+    builder.button(text="📋 Вывести статические профили", callback_data="static_profile_list")
+    builder.button(text="⬅️ Назад", callback_data="admin_user_list")
+    builder.adjust(1)
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="**Выберите действие**",
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+
+@router.callback_query(F.data == "static_profile_add")
+async def static_profile_add(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await safe_send_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        text="Введите имя для статического профиля:"
+    )
+    await state.set_state(AdminStates.CREATE_STATIC_PROFILE)
+
+
+@router.message(AdminStates.CREATE_STATIC_PROFILE)
+async def process_static_profile_name(message: Message, state: FSMContext):
+    profile_name = message.text
+    profile_data = await create_static_client(profile_name)
+    if profile_data:
+        vless_url = generate_vless_url(profile_data)
+        await create_static_profile(profile_name, vless_url)
+        profiles = await get_static_profiles()
+        for profile in profiles:
+            if profile.name == profile_name:
+                profile_id = profile.id
+                break
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{profile_id}")
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text="⛔ Доступ запрещён"
+            text=f"Профиль создан!\n\n`{vless_url}`",
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
         )
+    else:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="Ошибка при создании профиля"
+        )
+    await state.clear()
+
+
+@router.callback_query(F.data == "static_profile_list")
+async def static_profile_list(callback: CallbackQuery):
+    profiles = await get_static_profiles()
+    if not profiles:
+        await safe_answer_callback(callback, "Нет статических профилей")
         return
-
-    promos = await list_promocodes()
-    if not promos:
+    for profile in profiles:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{profile.id}")
         await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="📭 Промокодов пока нет"
-        )
-        return
-
-    text = "**📋 Список промокодов:**\n\n"
-    for p in promos:
-        status = "✅ Активен" if p.is_active else "❌ Неактивен"
-        expires = f", истекает {p.expires_at.strftime('%d.%m.%Y')}" if p.expires_at else ""
-        text += (
-            f"`{p.code}` — {p.months} мес., "
-            f"использовано {p.current_uses}/{p.max_uses}, {status}{expires}\n"
-        )
-    parts = split_text(text, MAX_MESSAGE_LENGTH)
-    for part in parts:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=part,
-            parse_mode="Markdown"
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            text=f"**{profile.name}**\n`{profile.vless_url}`",
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
         )
 
+
+@router.callback_query(F.data.startswith("delete_static_"))
+async def handle_delete_static_profile(callback: CallbackQuery):
+    try:
+        profile_id = int(callback.data.split("_")[-1])
+        with Session() as session:
+            profile = session.query(StaticProfile).filter_by(id=profile_id).first()
+            if not profile:
+                await safe_answer_callback(callback, "⚠️ Профиль не найден")
+                return
+            success = await delete_client_by_email(profile.name)
+            if not success:
+                logger.error(f"🛑 Ошибка удаления клиента из инбаунда: {profile.name}")
+            session.delete(profile)
+            session.commit()
+        await safe_answer_callback(callback, "✅ Профиль удален!")
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="🗑️ Профиль удален"
+        )
+    except Exception as e:
+        logger.error(f"🛑 Ошибка при удалении статического профиля: {e}")
+        await safe_answer_callback(callback, "⚠️ Ошибка при удалении профиля")
+
+
+# ---------- Админ: рассылка ----------
 @router.callback_query(F.data == "admin_send_message")
 async def admin_send_message_start(callback: CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
@@ -1366,7 +1589,6 @@ async def admin_send_message_start(callback: CallbackQuery, state: FSMContext):
     builder.button(text="👥 Всем пользователям", callback_data="target_all")
     builder.button(text="↩️ Назад", callback_data="admin_menu")
     builder.adjust(1)
-
     await safe_edit_message(
         bot=callback.bot,
         chat_id=callback.from_user.id,
@@ -1374,6 +1596,7 @@ async def admin_send_message_start(callback: CallbackQuery, state: FSMContext):
         text="Выберите целевую аудиторию для рассылки:",
         reply_markup=builder.as_markup()
     )
+
 
 @router.callback_query(F.data.startswith("target_"))
 async def admin_send_message_target(callback: CallbackQuery, state: FSMContext):
@@ -1387,29 +1610,6 @@ async def admin_send_message_target(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AdminStates.SEND_MESSAGE)
 
-@router.callback_query(F.data == "admin_create_promo")
-async def admin_create_promo_start(callback: CallbackQuery, state: FSMContext):
-    user = await get_user(callback.from_user.id)
-    if not user or not user.is_admin:
-        await safe_answer_callback(callback, "⛔ Доступ запрещён")
-        return
-    await safe_answer_callback(callback)
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔹 Одноразовый", callback_data="promo_type_single")
-    builder.button(text="🔸 Многоразовый", callback_data="promo_type_multi")
-    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
-    builder.adjust(1)
-    
-    await safe_edit_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text="🎫 **Создание промокода**\n\nВыберите тип промокода:",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(AdminPromoStates.choosing_type)
 
 @router.message(AdminStates.SEND_MESSAGE)
 async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
@@ -1427,7 +1627,6 @@ async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
 
     success = 0
     failed = 0
-
     for user in users:
         result = await safe_send_message(bot, user.telegram_id, text)
         if result:
@@ -1443,334 +1642,288 @@ async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
     )
     await state.clear()
 
-# ============================================
-# СИНХРОНИЗАЦИЯ КЛИЕНТОВ МЕЖДУ БД И ПАНЕЛЬЮ
-# ============================================
 
-@router.message(Command("sync_panel"))
-async def sync_panel_command(message: Message):
-    """Синхронизация клиентов между БД и панелью 3X-UI"""
-    user = await get_user(message.from_user.id)
+# ---------- Админ: не подключившиеся ----------
+@router.callback_query(F.data == "admin_inactive_users_list")
+async def admin_inactive_users_list(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
     if not user or not user.is_admin:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="⛔ Доступ запрещён. Только для администраторов."
-        )
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
         return
-    
-    await safe_send_message(
-        bot=message.bot,
-        chat_id=message.from_user.id,
-        text="🔄 Проверяю синхронизацию между БД и панелью..."
-    )
-    
-    try:
-        # Получаем клиентов из БД
-        db_clients = {}
-        with Session() as session:
-            # Используем правильный запрос
-            users = session.query(User).all()
-            for user in users:
-                if user.vless_profile_data:
-                    try:
-                        profile = json.loads(user.vless_profile_data)
-                        email = profile.get("email")
-                        if email:
-                            db_clients[email] = {
-                                "client_id": profile.get("client_id"),
-                                "email": email,
-                                "subId": profile.get("subId") or user.subscription_token,
-                                "is_enabled": user.is_enabled_in_panel,
-                                "tgId": user.telegram_id,
-                                "full_name": user.full_name,
-                                "user_id": user.id
-                            }
-                    except Exception as e:
-                        logger.warning(f"⚠️ Ошибка парсинга профиля {user.telegram_id}: {e}")
-        
-        # Получаем клиентов из панели
-        panel_clients = {}
-        async with XUIAPI() as api:
-            inbound = await api.get_inbound(config.INBOUND_ID)
-            if inbound:
-                settings_raw = inbound.get("settings", {})
-                if isinstance(settings_raw, str):
-                    settings = json.loads(settings_raw)
-                else:
-                    settings = settings_raw
-                
-                for client in settings.get("clients", []):
-                    email = client.get("email")
-                    if email:
-                        panel_clients[email] = client
-        
-        # Сравниваем
-        db_emails = set(db_clients.keys())
-        panel_emails = set(panel_clients.keys())
-        
-        missing_in_panel = db_emails - panel_emails
-        extra_in_panel = panel_emails - db_emails
-        common = db_emails & panel_emails
-        
-        # Формируем отчет
-        text = (
-            f"📊 **Статус синхронизации:**\n\n"
-            f"👤 В БД: {len(db_emails)}\n"
-            f"📋 В панели: {len(panel_emails)}\n"
-            f"➕ Нужно добавить: {len(missing_in_panel)}\n"
-            f"➖ Лишних в панели: {len(extra_in_panel)}\n"
-            f"🔄 Совпадают: {len(common)}\n"
-        )
-        
-        if missing_in_panel:
-            text += f"\n📝 **Будут добавлены:**\n"
-            for email in list(missing_in_panel)[:10]:
-                text += f"• `{email}`\n"
-            if len(missing_in_panel) > 10:
-                text += f"... и еще {len(missing_in_panel) - 10}\n"
-        
-        if extra_in_panel:
-            text += f"\n⚠️ **Лишние в панели:**\n"
-            for email in list(extra_in_panel)[:10]:
-                text += f"• `{email}`\n"
-            if len(extra_in_panel) > 10:
-                text += f"... и еще {len(extra_in_panel) - 10}\n"
-        
-        # Кнопки действий
+    await safe_answer_callback(callback)
+
+    all_users = await get_all_users()
+    inactive_users = []
+    for u in all_users:
+        if not u.vless_profile_data:
+            inactive_users.append(u)
+
+    if not inactive_users:
         builder = InlineKeyboardBuilder()
-        if missing_in_panel:
-            builder.button(
-                text=f"✅ Добавить {len(missing_in_panel)} клиентов",
-                callback_data="confirm_sync_add"
-            )
-        builder.button(text="❌ Отмена", callback_data="back_to_menu")
-        builder.adjust(1)
-        
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=text,
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка синхронизации: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=f"❌ Ошибка: {e}"
-        )
-
-
-@router.callback_query(F.data == "confirm_sync_add")
-async def confirm_sync_add(callback: CallbackQuery):
-    """Подтверждение добавления клиентов"""
-    await safe_answer_callback(callback, "⏳ Добавляю клиентов...")
-    
-    try:
-        # Получаем клиентов из БД
-        db_clients = {}
-        with Session() as session:
-            users = session.query(User).all()
-            for user in users:
-                if user.vless_profile_data:
-                    try:
-                        profile = json.loads(user.vless_profile_data)
-                        email = profile.get("email")
-                        if email:
-                            db_clients[email] = {
-                                "client_id": profile.get("client_id"),
-                                "email": email,
-                                "subId": profile.get("subId") or user.subscription_token,
-                                "is_enabled": user.is_enabled_in_panel,
-                                "tgId": user.telegram_id,
-                                "full_name": user.full_name
-                            }
-                    except:
-                        pass
-        
-        # Получаем список email из панели
-        panel_emails = set()
-        async with XUIAPI() as api:
-            inbound = await api.get_inbound(config.INBOUND_ID)
-            if inbound:
-                settings_raw = inbound.get("settings", {})
-                if isinstance(settings_raw, str):
-                    settings = json.loads(settings_raw)
-                else:
-                    settings = settings_raw
-                
-                for client in settings.get("clients", []):
-                    if client.get("email"):
-                        panel_emails.add(client.get("email"))
-        
-        missing = set(db_clients.keys()) - panel_emails
-        
-        if not missing:
-            await callback.message.edit_text("✅ Все клиенты уже в панели!")
-            return
-        
-        added = []
-        errors = []
-        
-        async with XUIAPI() as api:
-            for email in missing:
-                try:
-                    client_data = db_clients[email]
-                    
-                    # Формируем payload для добавления клиента
-                    client_settings = {
-                        "id": client_data["client_id"],
-                        "email": email,
-                        "flow": "xtls-rprx-vision",
-                        "limitIp": 2,
-                        "totalGB": 0,
-                        "expiryTime": 0,
-                        "enable": client_data.get("is_enabled", True),
-                        "tgId": client_data.get("tgId", 0),
-                        "subId": (client_data.get("subId") or email)[:16],
-                        "comment": client_data.get("full_name", "")
-                    }
-                    
-                    payload = {
-                        "client": client_settings,
-                        "inboundIds": [config.INBOUND_ID]
-                    }
-                    
-                    url = f"{api.base_url}{api.api_prefix}/clients/add"
-                    async with api.session.post(url, json=payload) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("success"):
-                                added.append(email)
-                                logger.info(f"✅ Добавлен клиент: {email}")
-                            else:
-                                errors.append(f"{email}: {data.get('msg', 'Unknown error')}")
-                        else:
-                            errors.append(f"{email}: HTTP {resp.status}")
-                            
-                except Exception as e:
-                    errors.append(f"{email}: {str(e)}")
-                    logger.error(f"❌ Ошибка добавления {email}: {e}")
-        
-        # Результат
-        text = f"📊 **Результат синхронизации:**\n\n✅ Добавлено: {len(added)}\n❌ Ошибок: {len(errors)}"
-        
-        if added:
-            text += f"\n\n✅ **Добавлены:**\n"
-            for email in added[:10]:
-                text += f"• `{email}`\n"
-            if len(added) > 10:
-                text += f"... и еще {len(added) - 10}\n"
-        
-        if errors:
-            text += f"\n❌ **Ошибки:**\n"
-            for error in errors[:10]:
-                text += f"• {error}\n"
-            if len(errors) > 10:
-                text += f"... и еще {len(errors) - 10}\n"
-        
-        builder = InlineKeyboardBuilder()
-        builder.button(text="⬅️ Назад в меню", callback_data="back_to_menu")
-        builder.adjust(1)
-        
-        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка добавления клиентов: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        await callback.message.edit_text(f"❌ Ошибка: {e}")
-
-@router.message(Command("addpromo"))
-async def add_promo_cmd(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user or not user.is_admin:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="⛔ Доступ запрещён"
+        builder.button(text="⬅️ Назад", callback_data="admin_menu")
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="✅ Все пользователи уже подключались к VPN!",
+            reply_markup=builder.as_markup()
         )
         return
 
-    args = message.text.split()
-    if len(args) < 3:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="Использование: /addpromo <месяцы> <макс_использований> [код]"
-        )
-        return
+    text = f"📋 **Пользователи без подключения:** ({len(inactive_users)})\n\n"
+    for u in inactive_users[:30]:
+        username = f"@{u.username}" if u.username else "Нет username"
+        reg_date = u.registration_date.strftime("%d.%m.%Y") if hasattr(u, 'registration_date') else "неизвестно"
+        text += f"• {u.full_name} ({username}) | ID: `{u.telegram_id}` | Регистрация: {reg_date}\n"
+    if len(inactive_users) > 30:
+        text += f"\n... и еще {len(inactive_users) - 30} пользователей"
 
-    try:
-        months = int(args[1])
-        max_uses = int(args[2])
-    except ValueError:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="❌ Месяцы и макс. использования должны быть числами"
-        )
-        return
-
-    if not (1 <= months <= 12):
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="❌ Месяцы должны быть от 1 до 12"
-        )
-        return
-    if max_uses < 1:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="❌ Макс. использования должно быть >= 1"
-        )
-        return
-
-    code = args[3] if len(args) >= 4 else None
-
-    try:
-        promo = await create_promo_code(months, max_uses, code)
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=f"✅ Промокод создан!\nКод: `{promo.code}`\nМесяцев: {promo.months}\nИспользований: {promo.current_uses}/{promo.max_uses}",
-            parse_mode="Markdown"
-        )
-    except ValueError as e:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=f"❌ Ошибка: {e}"
-        )
-    except Exception as e:
-        logger.error(f"Error creating promo: {e}")
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="❌ Внутренняя ошибка"
-        )
-
-@router.callback_query(F.data == "static_profiles_menu")
-async def static_profiles_menu(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-    builder.button(text="🆕 Добавить статический профиль", callback_data="static_profile_add")
-    builder.button(text="📋 Вывести статические профили", callback_data="static_profile_list")
-    builder.button(text="⬅️ Назад", callback_data="admin_user_list")
+    builder.button(
+        text=f"🎁 Выдать неделю всем ({len(inactive_users)})",
+        callback_data="admin_give_week_to_inactive"
+    )
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
     builder.adjust(1)
+
     await safe_edit_message(
         bot=callback.bot,
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
-        text="**Выберите действие**",
+        text=text,
         reply_markup=builder.as_markup(),
         parse_mode='Markdown'
     )
+
+
+@router.callback_query(F.data == "admin_give_week_to_inactive")
+async def admin_give_week_to_inactive(callback: CallbackQuery, bot: Bot):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+
+    await safe_answer_callback(callback, "⏳ Проверяю пользователей...")
+
+    all_users = await get_all_users()
+    inactive_users = []
+    for u in all_users:
+        if not u.vless_profile_data:
+            inactive_users.append(u)
+
+    if not inactive_users:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="admin_inactive_users_list")
+        await safe_edit_message(
+            bot=bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="✅ Нет пользователей для выдачи подписки",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"✅ Да, выдать неделю ({len(inactive_users)})",
+        callback_data="admin_confirm_give_week_inactive"
+    )
+    builder.button(text="❌ Отмена", callback_data="admin_inactive_users_list")
+    builder.adjust(1)
+
+    preview_text = ""
+    for u in inactive_users[:10]:
+        username = f"@{u.username}" if u.username else "Нет username"
+        preview_text += f"• {u.full_name} ({username}) - ID: `{u.telegram_id}`\n"
+    if len(inactive_users) > 10:
+        preview_text += f"\n... и еще {len(inactive_users) - 10} пользователей"
+
+    text = (
+        f"⚠️ **Подтверждение выдачи подписки**\n\n"
+        f"Вы собираетесь выдать **1 неделю** подписки всем пользователям, которые ни разу не нажимали кнопку 'Подключить'.\n\n"
+        f"📊 **Всего пользователей:** {len(inactive_users)}\n\n"
+        f"📋 **Первые 10 пользователей:**\n{preview_text}\n\n"
+        f"Продолжить?"
+    )
+
+    await safe_edit_message(
+        bot=bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+
+@router.callback_query(F.data == "admin_confirm_give_week_inactive")
+async def admin_confirm_give_week_inactive(callback: CallbackQuery, bot: Bot):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+
+    await safe_answer_callback(callback, "⏳ Начинаю выдачу подписки...")
+
+    all_users = await get_all_users()
+    inactive_users = [u for u in all_users if not u.vless_profile_data]
+    if not inactive_users:
+        await safe_edit_message(
+            bot=bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="✅ Нет пользователей для выдачи подписки"
+        )
+        return
+
+    success_count = 0
+    failed_count = 0
+    failed_users = []
+
+    for user in inactive_users:
+        try:
+            profile_data = await create_vless_profile(user.telegram_id, subscription_days=7)
+            if profile_data:
+                with Session() as session:
+                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                    if db_user:
+                        db_user.vless_profile_data = json.dumps(profile_data)
+                        db_user.subscription_token = profile_data.get("subId")
+                        db_user.subscription_end = datetime.utcnow() + timedelta(days=7)
+                        db_user.is_enabled_in_panel = True
+                        session.commit()
+
+                client_ip = profile_data.get("client_ip")
+                if client_ip:
+                    with Session() as session:
+                        db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                        if db_user and not db_user.client_ip:
+                            db_user.client_ip = client_ip
+                            session.commit()
+                    await apply_tc_limit(client_ip)
+
+                if profile_data.get("email"):
+                    await enable_client_by_email(profile_data["email"])
+
+                sub_id = profile_data.get("subId")
+                if sub_id:
+                    subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
+                    text = (
+                        "🎉 **Вам выдана неделя VPN бесплатно!**\n\n"
+                        "🔗 **Ваша персональная ссылка для подписки:**\n"
+                        f"`{subscription_link}`\n\n"
+                        "ℹ️ **Инструкция:**\n"
+                        "1. Скопируйте ссылку.\n"
+                        "2. Импортируйте как подписку в приложении.\n"
+                        "3. Готово! 🎉"
+                    )
+                else:
+                    vless_url = generate_vless_url(profile_data)
+                    text = (
+                        "🎉 **Вам выдана неделя VPN бесплато!**\n\n"
+                        f"`{vless_url}`\n\n"
+                        "Скопируйте ссылку и импортируйте в приложение."
+                    )
+
+                builder = InlineKeyboardBuilder()
+                builder.button(text='🖥️ Windows [Happ]', url='https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe')
+                builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
+                builder.button(text='🍎 Mac [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
+                builder.button(text='🍏 iOS [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
+                builder.button(text='🤖 Android [Happ]', url='https://play.google.com/store/apps/details?id=com.happproxy&hl=ru')
+                builder.adjust(2, 2, 1)
+
+                await safe_send_message(
+                    bot=bot,
+                    chat_id=user.telegram_id,
+                    text=text,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='Markdown'
+                )
+
+                success_count += 1
+                logger.info(f"✅ Выдана неделя подписки пользователю {user.telegram_id}")
+            else:
+                failed_count += 1
+                failed_users.append(f"{user.telegram_id} (ошибка создания профиля)")
+                logger.error(f"❌ Ошибка создания профиля для {user.telegram_id}")
+        except Exception as e:
+            failed_count += 1
+            failed_users.append(f"{user.telegram_id} ({str(e)[:50]})")
+            logger.error(f"❌ Ошибка при выдаче подписки {user.telegram_id}: {e}")
+        await asyncio.sleep(0.3)
+
+    admin_text = (
+        f"📊 **Результат выдачи недели:**\n\n"
+        f"✅ Успешно: {success_count}\n"
+        f"❌ Ошибок: {failed_count}\n"
+        f"📊 Всего: {len(inactive_users)}\n\n"
+    )
+    if failed_users:
+        admin_text += "❌ **Ошибки у пользователей:**\n"
+        for uid in failed_users[:10]:
+            admin_text += f"• {uid}\n"
+        if len(failed_users) > 10:
+            admin_text += f"... и еще {len(failed_users) - 10}"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Список не подключившихся", callback_data="admin_inactive_users_list")
+    builder.button(text="⬅️ Назад в меню", callback_data="admin_menu")
+    builder.adjust(1)
+
+    await safe_edit_message(
+        bot=bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text=admin_text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+
+# ---------- Админ: создание промокодов ----------
+@router.callback_query(F.data == "admin_create_promo")
+async def admin_create_promo_start(callback: CallbackQuery, state: FSMContext):
+    user = await get_user(callback.from_user.id)
+    if not user or not user.is_admin:
+        await safe_answer_callback(callback, "⛔ Доступ запрещён")
+        return
+    await safe_answer_callback(callback)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔹 Одноразовый", callback_data="promo_type_single")
+    builder.button(text="🔸 Многоразовый", callback_data="promo_type_multi")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="🎫 **Создание промокода**\n\nВыберите тип промокода:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminPromoStates.choosing_type)
+
+
+@router.callback_query(AdminPromoStates.choosing_type, F.data.in_({"promo_type_single", "promo_type_multi"}))
+async def admin_promo_choose_type(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    promo_type = "single" if callback.data == "promo_type_single" else "multi"
+    await state.update_data(promo_type=promo_type)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="🗓 Введите количество месяцев (от 1 до 12):",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(AdminPromoStates.entering_months)
+
 
 @router.message(AdminPromoStates.entering_months)
 async def admin_promo_enter_months(message: Message, state: FSMContext):
@@ -1785,10 +1938,10 @@ async def admin_promo_enter_months(message: Message, state: FSMContext):
             text="❌ Пожалуйста, введите число от 1 до 12."
         )
         return
-    
+
     await state.update_data(months=months)
     data = await state.get_data()
-    
+
     if data["promo_type"] == "single":
         await state.update_data(max_uses=1)
         builder = InlineKeyboardBuilder()
@@ -1814,92 +1967,6 @@ async def admin_promo_enter_months(message: Message, state: FSMContext):
         )
         await state.set_state(AdminPromoStates.entering_max_uses)
 
-@router.callback_query(F.data == "static_profile_add")
-async def static_profile_add(callback: CallbackQuery, state: FSMContext):
-    await safe_answer_callback(callback)
-    await safe_send_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        text="Введите имя для статического профиля:"
-    )
-    await state.set_state(AdminStates.CREATE_STATIC_PROFILE)
-
-@router.message(AdminStates.CREATE_STATIC_PROFILE)
-async def process_static_profile_name(message: Message, state: FSMContext):
-    profile_name = message.text
-    profile_data = await create_static_client(profile_name)
-
-    if profile_data:
-        vless_url = generate_vless_url(profile_data)
-        await create_static_profile(profile_name, vless_url)
-        profiles = await get_static_profiles()
-        for profile in profiles:
-            if profile.name == profile_name:
-                id = profile.id
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{id}")
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text=f"Профиль создан!\n\n`{vless_url}`",
-            reply_markup=builder.as_markup(),
-            parse_mode='Markdown'
-        )
-    else:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="Ошибка при создании профиля"
-        )
-
-    await state.clear()
-
-@router.callback_query(F.data == "static_profile_list")
-async def static_profile_list(callback: CallbackQuery):
-    profiles = await get_static_profiles()
-    if not profiles:
-        await safe_answer_callback(callback, "Нет статических профилей")
-        return
-
-    for profile in profiles:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{profile.id}")
-        await safe_send_message(
-            bot=callback.bot,
-            chat_id=callback.from_user.id,
-            text=f"**{profile.name}**\n`{profile.vless_url}`",
-            reply_markup=builder.as_markup(),
-            parse_mode='Markdown'
-        )
-
-@router.callback_query(F.data.startswith("delete_static_"))
-async def handle_delete_static_profile(callback: CallbackQuery):
-    try:
-        profile_id = int(callback.data.split("_")[-1])
-
-        with Session() as session:
-            profile = session.query(StaticProfile).filter_by(id=profile_id).first()
-            if not profile:
-                await safe_answer_callback(callback, "⚠️ Профиль не найден")
-                return
-
-            success = await delete_client_by_email(profile.name)
-            if not success:
-                logger.error(f"🛑 Ошибка удаления клиента из инбаунда: {profile.name}")
-
-            session.delete(profile)
-            session.commit()
-
-        await safe_answer_callback(callback, "✅ Профиль удален!")
-        await safe_edit_message(
-            bot=callback.bot,
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text="🗑️ Профиль удален"
-        )
-    except Exception as e:
-        logger.error(f"🛑 Ошибка при удалении статического профиля: {e}")
-        await safe_answer_callback(callback, "⚠️ Ошибка при удалении профиля")
 
 @router.message(AdminPromoStates.entering_max_uses)
 async def admin_promo_enter_max_uses(message: Message, state: FSMContext):
@@ -1914,9 +1981,8 @@ async def admin_promo_enter_max_uses(message: Message, state: FSMContext):
             text="❌ Введите целое число больше 1."
         )
         return
-    
+
     await state.update_data(max_uses=max_uses)
-    
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Сгенерировать автоматически", callback_data="promo_auto_code")
     builder.button(text="✏️ Ввести свой код", callback_data="promo_custom_code")
@@ -1930,6 +1996,135 @@ async def admin_promo_enter_max_uses(message: Message, state: FSMContext):
     )
     await state.set_state(AdminPromoStates.entering_custom_code)
 
+
+@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_auto_code")
+async def admin_promo_auto_code(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await state.update_data(custom_code=None)
+    await show_promo_confirmation(callback, state)
+
+
+@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_custom_code")
+async def admin_promo_custom_code_prompt(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="✏️ Введите желаемый код (только буквы и цифры, без пробелов):",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.message(AdminPromoStates.entering_custom_code)
+async def admin_promo_enter_custom_code(message: Message, state: FSMContext):
+    code = message.text.strip()
+    if not code or not code.isalnum():
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Код может содержать только буквы и цифры. Попробуйте ещё раз."
+        )
+        return
+
+    existing = await get_promo_by_code(code)
+    if existing:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="❌ Такой код уже существует. Введите другой код или используйте автогенерацию."
+        )
+        return
+
+    await state.update_data(custom_code=code)
+    await show_promo_confirmation(message, state)
+
+
+@router.callback_query(F.data == "admin_promo_cancel")
+async def admin_promo_cancel(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    await state.clear()
+    await safe_edit_message(
+        bot=callback.bot,
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="⛔ Создание промокода отменено."
+    )
+    await show_menu(callback.bot, callback.from_user.id, callback.message.message_id)
+
+
+async def show_promo_confirmation(target, state: FSMContext):
+    data = await state.get_data()
+    promo_type = "одноразовый" if data["promo_type"] == "single" else "многоразовый"
+    code_desc = data.get("custom_code") or "(будет сгенерирован автоматически)"
+
+    text = (
+        f"📋 **Параметры промокода:**\n"
+        f"• Тип: {promo_type}\n"
+        f"• Месяцев: {data['months']}\n"
+        f"• Макс. использований: {data['max_uses']}\n"
+        f"• Код: `{code_desc}`\n\n"
+        f"Подтверждаете создание?"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, создать", callback_data="admin_promo_confirm")
+    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
+    builder.adjust(1)
+
+    if isinstance(target, CallbackQuery):
+        await safe_edit_message(
+            bot=target.bot,
+            chat_id=target.from_user.id,
+            message_id=target.message.message_id,
+            text=text,
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+    else:
+        await safe_send_message(
+            bot=target.bot,
+            chat_id=target.from_user.id,
+            text=text,
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+    await state.set_state(AdminPromoStates.confirming)
+
+
+@router.callback_query(AdminPromoStates.confirming, F.data == "admin_promo_confirm")
+async def admin_promo_confirm(callback: CallbackQuery, state: FSMContext):
+    await safe_answer_callback(callback)
+    data = await state.get_data()
+
+    try:
+        promo = await create_promo_code(
+            months=data['months'],
+            max_uses=data['max_uses'],
+            code=data.get('custom_code')
+        )
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text=f"✅ **Промокод успешно создан!**\n\nКод: `{promo.code}`\nМесяцев: {promo.months}\nТип: {'одноразовый' if promo.max_uses == 1 else 'многоразовый'}\nИспользований: {promo.current_uses}/{promo.max_uses}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка создания промокода: {e}")
+        await safe_edit_message(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="❌ Произошла ошибка при создании промокода."
+        )
+    finally:
+        await state.clear()
+
+
+# ---------- Профиль и статистика ----------
 @router.callback_query(F.data == "connect")
 async def connect_profile(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
@@ -1953,7 +2148,6 @@ async def connect_profile(callback: CallbackQuery):
             delta = user.subscription_end - datetime.utcnow()
             remaining_days = delta.days
         profile_data = await create_vless_profile(user.telegram_id, subscription_days=remaining_days)
-
         if profile_data:
             with Session() as session:
                 db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
@@ -1982,19 +2176,11 @@ async def connect_profile(callback: CallbackQuery):
     sub_id = stats.get('subId')
     if not sub_id and user.subscription_token:
         sub_id = user.subscription_token
-        api = XUIAPI()
-        try:
-            await api.login()
+        async with XUIAPI() as api:
             await api.update_client_subid(profile_data['email'], sub_id)
-        finally:
-            await api.close()
 
     if sub_id:
         subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
-    else:
-        subscription_link = None
-
-    if subscription_link:
         vless_url = subscription_link
         text = (
             "🎉 **Ваш VPN профиль готов!**\n\n"
@@ -2036,47 +2222,6 @@ async def connect_profile(callback: CallbackQuery):
         parse_mode='Markdown'
     )
 
-@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_auto_code")
-async def admin_promo_auto_code(callback: CallbackQuery, state: FSMContext):
-    await safe_answer_callback(callback)
-    await state.update_data(custom_code=None)
-    await show_promo_confirmation(callback, state)
-
-@router.callback_query(AdminPromoStates.entering_custom_code, F.data == "promo_custom_code")
-async def admin_promo_custom_code_prompt(callback: CallbackQuery, state: FSMContext):
-    await safe_answer_callback(callback)
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
-    await safe_edit_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text="✏️ Введите желаемый код (только буквы и цифры, без пробелов):",
-        reply_markup=builder.as_markup()
-    )
-
-@router.message(AdminPromoStates.entering_custom_code)
-async def admin_promo_enter_custom_code(message: Message, state: FSMContext):
-    code = message.text.strip()
-    if not code or not code.isalnum():
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="❌ Код может содержать только буквы и цифры. Попробуйте ещё раз."
-        )
-        return
-    
-    existing = await get_promo_by_code(code)
-    if existing:
-        await safe_send_message(
-            bot=message.bot,
-            chat_id=message.from_user.id,
-            text="❌ Такой код уже существует. Введите другой код или используйте автогенерацию."
-        )
-        return
-    
-    await state.update_data(custom_code=code)
-    await show_promo_confirmation(message, state)
 
 @router.callback_query(F.data == "stats")
 async def user_stats(callback: CallbackQuery):
@@ -2084,23 +2229,21 @@ async def user_stats(callback: CallbackQuery):
     if not user or not user.vless_profile_data:
         await safe_answer_callback(callback, "⚠️ Профиль не создан")
         return
-    
+
     await safe_edit_message(
         bot=callback.bot,
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
         text="⚙️ Загружаем вашу статистику..."
     )
-    
+
     profile_data = safe_json_loads(user.vless_profile_data, default={})
     stats = await get_user_stats(profile_data["email"])
 
-    logger.debug(stats)
     upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
     upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
     if upload_size == "GB":
         upload = f"{int(float(upload) / 1024):.2f}"
-
     download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
     download_size = 'MB' if int(float(download)) < 1024 else 'GB'
     if download_size == "GB":
@@ -2114,466 +2257,230 @@ async def user_stats(callback: CallbackQuery):
         parse_mode='Markdown'
     )
 
-@router.callback_query(F.data == "admin_give_week_inactive")
-async def admin_give_week_to_inactive(callback: CallbackQuery, bot: Bot):
-    """Выдает неделю подписки пользователям, которые никогда не нажимали кнопку 'Подключить'"""
-    user = await get_user(callback.from_user.id)
-    if not user or not user.is_admin:
-        await safe_answer_callback(callback, "⛔ Доступ запрещён")
-        return
 
-    await safe_answer_callback(callback, "⏳ Проверяю пользователей...")
-    
-    # Получаем всех пользователей
-    all_users = await get_all_users()
-    
-    # Список пользователей, которые не подключались
-    inactive_users = []
-    already_have_sub = []
-    
-    for user in all_users:
-        # Проверяем, есть ли у пользователя профиль (нажимал ли кнопку Подключить)
-        has_profile = user.vless_profile_data is not None and user.vless_profile_data != ""
-        
-        if not has_profile:
-            # Пользователь никогда не подключался
-            inactive_users.append(user)
-        elif user.subscription_end and user.subscription_end > datetime.utcnow():
-            # У пользователя уже есть активная подписка
-            already_have_sub.append(user)
-    
-    if not inactive_users:
+# ---------- Синхронизация панели (команда /sync_panel) ----------
+@router.message(Command("sync_panel"))
+async def sync_panel_command(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
         await safe_send_message(
-            bot=bot,
-            chat_id=callback.from_user.id,
-            text="✅ Все пользователи уже подключались к VPN!"
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён. Только для администраторов."
         )
         return
-    
-    # Подтверждение перед выдачей
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=f"✅ Да, выдать {len(inactive_users)} пользователям",
-        callback_data="admin_confirm_give_week"
-    )
-    builder.button(text="❌ Отмена", callback_data="admin_menu")
-    builder.adjust(1)
-    
-    text = (
-        f"📊 **Найдено пользователей без подключения:** {len(inactive_users)}\n"
-        f"👤 **С активной подпиской:** {len(already_have_sub)}\n\n"
-        f"⚠️ Вы собираетесь выдать **1 неделю** подписки всем пользователям, которые ни разу не нажимали кнопку 'Подключить'.\n\n"
-        f"Продолжить?"
-    )
-    
-    # Показываем список первых 10 пользователей
-    if inactive_users:
-        text += "\n📋 **Первые 10 пользователей:**\n"
-        for u in inactive_users[:10]:
-            username = f"@{u.username}" if u.username else "Нет username"
-            text += f"• {u.full_name} ({username}) - ID: `{u.telegram_id}`\n"
-        if len(inactive_users) > 10:
-            text += f"\n... и еще {len(inactive_users) - 10} пользователей"
-    
-    await safe_edit_message(
-        bot=bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text=text,
-        reply_markup=builder.as_markup(),
-        parse_mode='Markdown'
+
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text="🔄 Проверяю синхронизацию между БД и панелью..."
     )
 
-@router.callback_query(F.data == "admin_inactive_users_list")
-async def admin_inactive_users_list(callback: CallbackQuery):
-    """Показывает список пользователей, которые никогда не подключались"""
-    user = await get_user(callback.from_user.id)
-    if not user or not user.is_admin:
-        await safe_answer_callback(callback, "⛔ Доступ запрещён")
-        return
-
-    await safe_answer_callback(callback)
-    
-    # Получаем всех пользователей
-    all_users = await get_all_users()
-    
-    # Фильтруем пользователей без профиля
-    inactive_users = []
-    for u in all_users:
-        has_profile = u.vless_profile_data is not None and u.vless_profile_data != ""
-        if not has_profile:
-            inactive_users.append(u)
-    
-    if not inactive_users:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="⬅️ Назад", callback_data="admin_menu")
-        await safe_edit_message(
-            bot=callback.bot,
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text="✅ Все пользователи уже подключались к VPN!",
-            reply_markup=builder.as_markup()
-        )
-        return
-    
-    # Формируем текст со списком
-    text = f"📋 **Пользователи без подключения:** ({len(inactive_users)})\n\n"
-    
-    # Показываем всех пользователей (или первых 30, если много)
-    display_users = inactive_users[:30]
-    for u in display_users:
-        username = f"@{u.username}" if u.username else "Нет username"
-        reg_date = u.created_at.strftime("%d.%m.%Y") if hasattr(u, 'created_at') else "неизвестно"
-        text += f"• {u.full_name} ({username}) | ID: `{u.telegram_id}` | Регистрация: {reg_date}\n"
-    
-    if len(inactive_users) > 30:
-        text += f"\n... и еще {len(inactive_users) - 30} пользователей"
-    
-    # Кнопки действий
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=f"🎁 Выдать неделю всем ({len(inactive_users)})",
-        callback_data="admin_give_week_to_inactive"
-    )
-    builder.button(text="⬅️ Назад", callback_data="admin_menu")
-    builder.adjust(1)
-    
-    await safe_edit_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text=text,
-        reply_markup=builder.as_markup(),
-        parse_mode='Markdown'
-    )
-
-@router.callback_query(F.data == "admin_give_week_to_inactive")
-async def admin_give_week_to_inactive(callback: CallbackQuery, bot: Bot):
-    """Выдает неделю подписки всем пользователям без подключения"""
-    user = await get_user(callback.from_user.id)
-    if not user or not user.is_admin:
-        await safe_answer_callback(callback, "⛔ Доступ запрещён")
-        return
-
-    await safe_answer_callback(callback, "⏳ Проверяю пользователей...")
-    
-    # Получаем всех пользователей
-    all_users = await get_all_users()
-    
-    # Фильтруем пользователей без профиля
-    inactive_users = []
-    for u in all_users:
-        has_profile = u.vless_profile_data is not None and u.vless_profile_data != ""
-        if not has_profile:
-            inactive_users.append(u)
-    
-    if not inactive_users:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="⬅️ Назад", callback_data="admin_inactive_users_list")
-        await safe_edit_message(
-            bot=bot,
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text="✅ Нет пользователей для выдачи подписки",
-            reply_markup=builder.as_markup()
-        )
-        return
-    
-    # Запрос подтверждения
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=f"✅ Да, выдать неделю ({len(inactive_users)})",
-        callback_data="admin_confirm_give_week_inactive"
-    )
-    builder.button(text="❌ Отмена", callback_data="admin_inactive_users_list")
-    builder.adjust(1)
-    
-    # Показываем первых 10 пользователей для подтверждения
-    preview_text = ""
-    for u in inactive_users[:10]:
-        username = f"@{u.username}" if u.username else "Нет username"
-        preview_text += f"• {u.full_name} ({username}) - ID: `{u.telegram_id}`\n"
-    if len(inactive_users) > 10:
-        preview_text += f"\n... и еще {len(inactive_users) - 10} пользователей"
-    
-    text = (
-        f"⚠️ **Подтверждение выдачи подписки**\n\n"
-        f"Вы собираетесь выдать **1 неделю** подписки всем пользователям, которые ни разу не нажимали кнопку 'Подключить'.\n\n"
-        f"📊 **Всего пользователей:** {len(inactive_users)}\n\n"
-        f"📋 **Первые 10 пользователей:**\n{preview_text}\n\n"
-        f"Продолжить?"
-    )
-    
-    await safe_edit_message(
-        bot=bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text=text,
-        reply_markup=builder.as_markup(),
-        parse_mode='Markdown'
-    )
-
-@router.callback_query(F.data == "admin_confirm_give_week_inactive")
-async def admin_confirm_give_week_inactive(callback: CallbackQuery, bot: Bot):
-    """Подтверждение выдачи недели подписки не подключившимся"""
-    user = await get_user(callback.from_user.id)
-    if not user or not user.is_admin:
-        await safe_answer_callback(callback, "⛔ Доступ запрещён")
-        return
-
-    await safe_answer_callback(callback, "⏳ Начинаю выдачу подписки...")
-    
-    # Получаем всех пользователей без профиля
-    all_users = await get_all_users()
-    inactive_users = [u for u in all_users if not u.vless_profile_data]
-    
-    if not inactive_users:
-        await safe_edit_message(
-            bot=bot,
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text="✅ Нет пользователей для выдачи подписки"
-        )
-        return
-    
-    success_count = 0
-    failed_count = 0
-    failed_users = []
-    
-    # Сообщение для админа
-    admin_text = f"📊 **Результат выдачи недели:**\n\n"
-    
-    for user in inactive_users:
-        try:
-            # Создаем профиль для пользователя
-            profile_data = await create_vless_profile(user.telegram_id, subscription_days=7)
-            
-            if profile_data:
-                # Обновляем данные пользователя в БД
-                with Session() as session:
-                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                    if db_user:
-                        db_user.vless_profile_data = json.dumps(profile_data)
-                        db_user.subscription_token = profile_data.get("subId")
-                        # Устанавливаем подписку на 7 дней
-                        db_user.subscription_end = datetime.utcnow() + timedelta(days=7)
-                        db_user.is_enabled_in_panel = True
-                        session.commit()
-                
-                # Применяем ограничение скорости
-                client_ip = profile_data.get("client_ip")
-                if client_ip:
-                    with Session() as session:
-                        db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                        if db_user and not db_user.client_ip:
-                            db_user.client_ip = client_ip
-                            session.commit()
-                    await apply_tc_limit(client_ip)
-                
-                # Включаем клиента в панели
-                if profile_data.get("email"):
-                    await enable_client_by_email(profile_data["email"])
-                
-                # Формируем ссылку для подключения
-                subscription_link = None
-                sub_id = profile_data.get("subId")
-                if sub_id:
-                    subscription_link = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
-                
-                # Отправляем пользователю сообщение с инструкцией
-                if subscription_link:
-                    text = (
-                        "🎉 **Вам выдана неделя VPN бесплатно!**\n\n"
-                        "🔗 **Ваша персональная ссылка для подписки:**\n"
-                        f"`{subscription_link}`\n\n"
-                        "ℹ️ **Инструкция по подключению:**\n"
-                        "1. Скопируйте эту ссылку.\n"
-                        "2. Откройте ваше VPN-приложение (V2RayNG, Nekobox, Hiddify, Happ).\n"
-                        "3. Импортируйте ссылку как **подписку** (Subscription).\n"
-                        "4. Приложение автоматически загрузит актуальную конфигурацию.\n\n"
-                        "✅ Теперь вы можете пользоваться VPN!"
-                    )
-                else:
-                    vless_url = generate_vless_url(profile_data)
-                    text = (
-                        "🎉 **Вам выдана неделя VPN бесплатно!**\n\n"
-                        "ℹ️ **Инструкция по подключению:**\n"
-                        "1. Скачайте приложение для вашей платформы\n"
-                        "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
-                        f"`{vless_url}`\n\n"
-                        "3. Активируйте соединение в приложении."
-                    )
-                
-                builder = InlineKeyboardBuilder()
-                builder.button(text='🖥️ Windows [Happ]', url='https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe')
-                builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
-                builder.button(text='🍎 Mac [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
-                builder.button(text='🍏 iOS [Happ]', url='https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973')
-                builder.button(text='🤖 Android [Happ]', url='https://play.google.com/store/apps/details?id=com.happproxy&hl=ru')
-                builder.adjust(2, 2, 1)
-                
-                await safe_send_message(
-                    bot=bot,
-                    chat_id=user.telegram_id,
-                    text=text,
-                    reply_markup=builder.as_markup(),
-                    parse_mode='Markdown'
-                )
-                
-                success_count += 1
-                logger.info(f"✅ Выдана неделя подписки пользователю {user.telegram_id}")
-                
-            else:
-                failed_count += 1
-                failed_users.append(f"{user.telegram_id} (ошибка создания профиля)")
-                logger.error(f"❌ Ошибка создания профиля для {user.telegram_id}")
-                
-        except Exception as e:
-            failed_count += 1
-            failed_users.append(f"{user.telegram_id} ({str(e)[:50]})")
-            logger.error(f"❌ Ошибка при выдаче подписки {user.telegram_id}: {e}")
-        
-        # Небольшая задержка между отправками
-        await asyncio.sleep(0.3)
-    
-    # Отчет админу
-    admin_text = (
-        f"📊 **Результат выдачи недели:**\n\n"
-        f"✅ Успешно: {success_count}\n"
-        f"❌ Ошибок: {failed_count}\n"
-        f"📊 Всего: {len(inactive_users)}\n\n"
-    )
-    
-    if failed_users:
-        admin_text += "❌ **Ошибки у пользователей:**\n"
-        for uid in failed_users[:10]:
-            admin_text += f"• {uid}\n"
-        if len(failed_users) > 10:
-            admin_text += f"... и еще {len(failed_users) - 10}"
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📋 Список не подключившихся", callback_data="admin_inactive_users_list")
-    builder.button(text="⬅️ Назад в меню", callback_data="admin_menu")
-    builder.adjust(1)
-    
-    await safe_edit_message(
-        bot=bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text=admin_text,
-        reply_markup=builder.as_markup(),
-        parse_mode='Markdown'
-    )
-
-async def show_promo_confirmation(target, state: FSMContext):
-    """Показывает сводку и запрашивает подтверждение"""
-    data = await state.get_data()
-    promo_type = "одноразовый" if data["promo_type"] == "single" else "многоразовый"
-    code_desc = data.get("custom_code") or "(будет сгенерирован автоматически)"
-    
-    text = (
-        f"📋 **Параметры промокода:**\n"
-        f"• Тип: {promo_type}\n"
-        f"• Месяцев: {data['months']}\n"
-        f"• Макс. использований: {data['max_uses']}\n"
-        f"• Код: `{code_desc}`\n\n"
-        f"Подтверждаете создание?"
-    )
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да, создать", callback_data="admin_promo_confirm")
-    builder.button(text="❌ Отмена", callback_data="admin_promo_cancel")
-    builder.adjust(1)
-    
-    if isinstance(target, CallbackQuery):
-        await safe_edit_message(
-            bot=target.bot,
-            chat_id=target.from_user.id,
-            message_id=target.message.message_id,
-            text=text,
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
-    else:
-        await safe_send_message(
-            bot=target.bot,
-            chat_id=target.from_user.id,
-            text=text,
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
-    
-    await state.set_state(AdminPromoStates.confirming)
-
-@router.callback_query(F.data == "admin_network_stats")
-async def network_stats(callback: CallbackQuery):
-    stats = await get_global_stats()
-
-    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
-    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
-    if upload_size == "GB":
-        upload = f"{int(float(upload) / 1024):.2f}"
-
-    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
-    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
-    if download_size == "GB":
-        download = f"{int(float(download) / 1024):.2f}"
-
-    await safe_answer_callback(callback)
-    await safe_edit_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text=f"📊 **Статистика использования сети:**\n\n🔼 Upload - `{upload} {upload_size}` | 🔽 Download - `{download} {download_size}`",
-        parse_mode='Markdown'
-    )
-
-@router.callback_query(AdminPromoStates.confirming, F.data == "admin_promo_confirm")
-async def admin_promo_confirm(callback: CallbackQuery, state: FSMContext):
-    await safe_answer_callback(callback)
-    data = await state.get_data()
-    
     try:
-        promo = await create_promo_code(
-            months=data['months'],
-            max_uses=data['max_uses'],
-            code=data.get('custom_code')
+        db_clients = {}
+        with Session() as session:
+            users = session.query(User).all()
+            for user in users:
+                if user.vless_profile_data:
+                    try:
+                        profile = json.loads(user.vless_profile_data)
+                        email = profile.get("email")
+                        if email:
+                            db_clients[email] = {
+                                "client_id": profile.get("client_id"),
+                                "email": email,
+                                "subId": profile.get("subId") or user.subscription_token,
+                                "is_enabled": user.is_enabled_in_panel,
+                                "tgId": user.telegram_id,
+                                "full_name": user.full_name,
+                                "user_id": user.id
+                            }
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка парсинга профиля {user.telegram_id}: {e}")
+
+        panel_clients = {}
+        async with XUIAPI() as api:
+            inbound = await api.get_inbound(config.INBOUND_ID)
+            if inbound:
+                settings_raw = inbound.get("settings", {})
+                if isinstance(settings_raw, str):
+                    settings = json.loads(settings_raw)
+                else:
+                    settings = settings_raw
+                for client in settings.get("clients", []):
+                    email = client.get("email")
+                    if email:
+                        panel_clients[email] = client
+
+        db_emails = set(db_clients.keys())
+        panel_emails = set(panel_clients.keys())
+
+        missing_in_panel = db_emails - panel_emails
+        extra_in_panel = panel_emails - db_emails
+        common = db_emails & panel_emails
+
+        text = (
+            f"📊 **Статус синхронизации:**\n\n"
+            f"👤 В БД: {len(db_emails)}\n"
+            f"📋 В панели: {len(panel_emails)}\n"
+            f"➕ Нужно добавить: {len(missing_in_panel)}\n"
+            f"➖ Лишних в панели: {len(extra_in_panel)}\n"
+            f"🔄 Совпадают: {len(common)}\n"
         )
-        await safe_edit_message(
-            bot=callback.bot,
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text=f"✅ **Промокод успешно создан!**\n\nКод: `{promo.code}`\nМесяцев: {promo.months}\nТип: {'одноразовый' if promo.max_uses == 1 else 'многоразовый'}\nИспользований: {promo.current_uses}/{promo.max_uses}",
+
+        if missing_in_panel:
+            text += f"\n📝 **Будут добавлены:**\n"
+            for email in list(missing_in_panel)[:10]:
+                text += f"• `{email}`\n"
+            if len(missing_in_panel) > 10:
+                text += f"... и еще {len(missing_in_panel) - 10}\n"
+
+        if extra_in_panel:
+            text += f"\n⚠️ **Лишние в панели:**\n"
+            for email in list(extra_in_panel)[:10]:
+                text += f"• `{email}`\n"
+            if len(extra_in_panel) > 10:
+                text += f"... и еще {len(extra_in_panel) - 10}\n"
+
+        builder = InlineKeyboardBuilder()
+        if missing_in_panel:
+            builder.button(
+                text=f"✅ Добавить {len(missing_in_panel)} клиентов",
+                callback_data="confirm_sync_add"
+            )
+        builder.button(text="❌ Отмена", callback_data="back_to_menu")
+        builder.adjust(1)
+
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=text,
+            reply_markup=builder.as_markup(),
             parse_mode="Markdown"
         )
-    except Exception as e:
-        logger.exception(f"Ошибка создания промокода: {e}")
-        await safe_edit_message(
-            bot=callback.bot,
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text="❌ Произошла ошибка при создании промокода."
-        )
-    finally:
-        await state.finish()
 
+    except Exception as e:
+        logger.error(f"❌ Ошибка синхронизации: {e}", exc_info=True)
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка: {e}"
+        )
+
+
+@router.callback_query(F.data == "confirm_sync_add")
+async def confirm_sync_add(callback: CallbackQuery):
+    await safe_answer_callback(callback, "⏳ Добавляю клиентов...")
+
+    try:
+        db_clients = {}
+        with Session() as session:
+            users = session.query(User).all()
+            for user in users:
+                if user.vless_profile_data:
+                    try:
+                        profile = json.loads(user.vless_profile_data)
+                        email = profile.get("email")
+                        if email:
+                            db_clients[email] = {
+                                "client_id": profile.get("client_id"),
+                                "email": email,
+                                "subId": profile.get("subId") or user.subscription_token,
+                                "is_enabled": user.is_enabled_in_panel,
+                                "tgId": user.telegram_id,
+                                "full_name": user.full_name
+                            }
+                    except:
+                        pass
+
+        panel_emails = set()
+        async with XUIAPI() as api:
+            inbound = await api.get_inbound(config.INBOUND_ID)
+            if inbound:
+                settings_raw = inbound.get("settings", {})
+                if isinstance(settings_raw, str):
+                    settings = json.loads(settings_raw)
+                else:
+                    settings = settings_raw
+                for client in settings.get("clients", []):
+                    if client.get("email"):
+                        panel_emails.add(client.get("email"))
+
+        missing = set(db_clients.keys()) - panel_emails
+        if not missing:
+            await callback.message.edit_text("✅ Все клиенты уже в панели!")
+            return
+
+        added = []
+        errors = []
+
+        async with XUIAPI() as api:
+            for email in missing:
+                try:
+                    client_data = db_clients[email]
+                    client_settings = {
+                        "id": client_data["client_id"],
+                        "email": email,
+                        "flow": "xtls-rprx-vision",
+                        "limitIp": 2,
+                        "totalGB": 0,
+                        "expiryTime": 0,
+                        "enable": client_data.get("is_enabled", True),
+                        "tgId": client_data.get("tgId", 0),
+                        "subId": (client_data.get("subId") or email)[:16],
+                        "comment": client_data.get("full_name", "")
+                    }
+                    payload = {
+                        "client": client_settings,
+                        "inboundIds": [config.INBOUND_ID]
+                    }
+                    url = f"{api.base_url}{api.api_prefix}/clients/add"
+                    async with api.session.post(url, json=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("success"):
+                                added.append(email)
+                                logger.info(f"✅ Добавлен клиент: {email}")
+                            else:
+                                errors.append(f"{email}: {data.get('msg', 'Unknown error')}")
+                        else:
+                            errors.append(f"{email}: HTTP {resp.status}")
+                except Exception as e:
+                    errors.append(f"{email}: {str(e)}")
+                    logger.error(f"❌ Ошибка добавления {email}: {e}")
+
+        text = f"📊 **Результат синхронизации:**\n\n✅ Добавлено: {len(added)}\n❌ Ошибок: {len(errors)}"
+        if added:
+            text += f"\n\n✅ **Добавлены:**\n"
+            for email in added[:10]:
+                text += f"• `{email}`\n"
+            if len(added) > 10:
+                text += f"... и еще {len(added) - 10}\n"
+        if errors:
+            text += f"\n❌ **Ошибки:**\n"
+            for error in errors[:10]:
+                text += f"• {error}\n"
+            if len(errors) > 10:
+                text += f"... и еще {len(errors) - 10}\n"
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад в меню", callback_data="back_to_menu")
+        builder.adjust(1)
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления клиентов: {e}", exc_info=True)
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+
+
+# ---------- Возврат в меню ----------
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, bot: Bot):
     await safe_answer_callback(callback)
     await show_menu(bot, callback.from_user.id, callback.message.message_id)
 
-@router.callback_query(F.data == "admin_promo_cancel")
-async def admin_promo_cancel(callback: CallbackQuery, state: FSMContext):
-    await safe_answer_callback(callback)
-    await state.finish()
-    await safe_edit_message(
-        bot=callback.bot,
-        chat_id=callback.from_user.id,
-        message_id=callback.message.message_id,
-        text="⛔ Создание промокода отменено."
-    )
-    await show_menu(callback.bot, callback.from_user.id, callback.message.message_id)
 
+# ---------- Регистрация обработчиков ----------
 def setup_handlers(dp: Dispatcher):
     dp.include_router(router)
     logger.info("✅ Handlers setup completed")
