@@ -2319,6 +2319,14 @@ async def sync_panel_command(message: Message):
         extra_in_panel = panel_emails - db_emails
         common = db_emails & panel_emails
 
+        # ---- Сравнение UUID ----
+        mismatched_uuid = []
+        for email in common:
+            db_uuid = db_clients[email].get("client_id")
+            panel_uuid = panel_clients[email].get("id")  # или "client_id"? В JSON панели поле "id"
+            if db_uuid and panel_uuid and db_uuid != panel_uuid:
+                mismatched_uuid.append(email)
+
         text = (
             f"📊 **Статус синхронизации:**\n\n"
             f"👤 В БД: {len(db_emails)}\n"
@@ -2326,6 +2334,7 @@ async def sync_panel_command(message: Message):
             f"➕ Нужно добавить: {len(missing_in_panel)}\n"
             f"➖ Лишних в панели: {len(extra_in_panel)}\n"
             f"🔄 Совпадают: {len(common)}\n"
+            f"⚠️ Несовпадение UUID: {len(mismatched_uuid)}\n"
         )
 
         if missing_in_panel:
@@ -2335,18 +2344,25 @@ async def sync_panel_command(message: Message):
             if len(missing_in_panel) > 10:
                 text += f"... и еще {len(missing_in_panel) - 10}\n"
 
+        if mismatched_uuid:
+            text += f"\n🔄 **Будут исправлены UUID:**\n"
+            for email in mismatched_uuid[:10]:
+                text += f"• `{email}` (БД: {db_clients[email]['client_id'][:8]}..., панель: {panel_clients[email]['id'][:8]}...)\n"
+            if len(mismatched_uuid) > 10:
+                text += f"... и еще {len(mismatched_uuid) - 10}\n"
+
         if extra_in_panel:
-            text += f"\n⚠️ **Лишние в панели:**\n"
+            text += f"\n⚠️ **Лишние в панели (не будут удалены):**\n"
             for email in list(extra_in_panel)[:10]:
                 text += f"• `{email}`\n"
             if len(extra_in_panel) > 10:
                 text += f"... и еще {len(extra_in_panel) - 10}\n"
 
         builder = InlineKeyboardBuilder()
-        if missing_in_panel:
+        if missing_in_panel or mismatched_uuid:
             builder.button(
-                text=f"✅ Добавить {len(missing_in_panel)} клиентов",
-                callback_data="confirm_sync_add"
+                text=f"✅ Синхронизировать (добавить {len(missing_in_panel)}, исправить {len(mismatched_uuid)})",
+                callback_data="confirm_sync_full"
             )
         builder.button(text="❌ Отмена", callback_data="back_to_menu")
         builder.adjust(1)
@@ -2368,11 +2384,13 @@ async def sync_panel_command(message: Message):
         )
 
 
-@router.callback_query(F.data == "confirm_sync_add")
-async def confirm_sync_add(callback: CallbackQuery):
-    await safe_answer_callback(callback, "⏳ Добавляю клиентов...")
+@router.callback_query(F.data == "confirm_sync_full")
+async def confirm_sync_full(callback: CallbackQuery):
+    """Полная синхронизация: добавление отсутствующих + исправление UUID"""
+    await safe_answer_callback(callback, "⏳ Выполняю синхронизацию...")
 
     try:
+        # 1. Получаем данные из БД
         db_clients = {}
         with Session() as session:
             users = session.query(User).all()
@@ -2393,7 +2411,8 @@ async def confirm_sync_add(callback: CallbackQuery):
                     except:
                         pass
 
-        panel_emails = set()
+        # 2. Получаем список клиентов из панели
+        panel_emails = {}
         async with XUIAPI() as api:
             inbound = await api.get_inbound(config.INBOUND_ID)
             if inbound:
@@ -2403,18 +2422,71 @@ async def confirm_sync_add(callback: CallbackQuery):
                 else:
                     settings = settings_raw
                 for client in settings.get("clients", []):
-                    if client.get("email"):
-                        panel_emails.add(client.get("email"))
+                    email = client.get("email")
+                    if email:
+                        panel_emails[email] = client
 
-        missing = set(db_clients.keys()) - panel_emails
-        if not missing:
-            await callback.message.edit_text("✅ Все клиенты уже в панели!")
-            return
+        # 3. Определяем категории
+        db_emails = set(db_clients.keys())
+        panel_emails_set = set(panel_emails.keys())
 
-        added = []
+        missing = db_emails - panel_emails_set
+        common = db_emails & panel_emails_set
+        mismatched = []
+        for email in common:
+            db_uuid = db_clients[email].get("client_id")
+            panel_uuid = panel_emails[email].get("id")
+            if db_uuid and panel_uuid and db_uuid != panel_uuid:
+                mismatched.append(email)
+
+        added = 0
+        fixed = 0
         errors = []
 
         async with XUIAPI() as api:
+            # ---- Исправляем UUID (удаляем старый, добавляем новый) ----
+            for email in mismatched:
+                try:
+                    # Удаляем старого клиента
+                    del_ok = await api.delete_client(email)
+                    if not del_ok:
+                        errors.append(f"Не удалось удалить клиента {email} для исправления UUID")
+                        continue
+
+                    # Добавляем с правильным UUID
+                    client_data = db_clients[email]
+                    client_settings = {
+                        "id": client_data["client_id"],
+                        "email": email,
+                        "flow": "xtls-rprx-vision",
+                        "limitIp": 2,
+                        "totalGB": 0,
+                        "expiryTime": 0,
+                        "enable": client_data.get("is_enabled", True),
+                        "tgId": client_data.get("tgId", 0),
+                        "subId": (client_data.get("subId") or email)[:16],
+                        "comment": client_data.get("full_name", "")
+                    }
+                    payload = {
+                        "client": client_settings,
+                        "inboundIds": [config.INBOUND_ID]
+                    }
+                    url = f"{api.base_url}{api.api_prefix}/clients/add"
+                    async with api.session.post(url, json=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("success"):
+                                fixed += 1
+                                logger.info(f"✅ Исправлен UUID для {email}")
+                            else:
+                                errors.append(f"{email}: {data.get('msg', 'Unknown error')}")
+                        else:
+                            errors.append(f"{email}: HTTP {resp.status}")
+                except Exception as e:
+                    errors.append(f"{email}: {str(e)}")
+                    logger.error(f"❌ Ошибка исправления UUID для {email}: {e}")
+
+            # ---- Добавляем отсутствующих ----
             for email in missing:
                 try:
                     client_data = db_clients[email]
@@ -2439,7 +2511,7 @@ async def confirm_sync_add(callback: CallbackQuery):
                         if resp.status == 200:
                             data = await resp.json()
                             if data.get("success"):
-                                added.append(email)
+                                added += 1
                                 logger.info(f"✅ Добавлен клиент: {email}")
                             else:
                                 errors.append(f"{email}: {data.get('msg', 'Unknown error')}")
@@ -2449,30 +2521,24 @@ async def confirm_sync_add(callback: CallbackQuery):
                     errors.append(f"{email}: {str(e)}")
                     logger.error(f"❌ Ошибка добавления {email}: {e}")
 
-        text = f"📊 **Результат синхронизации:**\n\n✅ Добавлено: {len(added)}\n❌ Ошибок: {len(errors)}"
-        if added:
-            text += f"\n\n✅ **Добавлены:**\n"
-            for email in added[:10]:
-                text += f"• `{email}`\n"
-            if len(added) > 10:
-                text += f"... и еще {len(added) - 10}\n"
+        # ---- Отчёт ----
+        text = f"📊 **Результат синхронизации:**\n\n✅ Добавлено: {added}\n🔄 Исправлено UUID: {fixed}\n❌ Ошибок: {len(errors)}"
         if errors:
-            text += f"\n❌ **Ошибки:**\n"
-            for error in errors[:10]:
-                text += f"• {error}\n"
+            text += f"\n\n❌ **Ошибки:**\n"
+            for err in errors[:10]:
+                text += f"• {err}\n"
             if len(errors) > 10:
                 text += f"... и еще {len(errors) - 10}\n"
 
         builder = InlineKeyboardBuilder()
         builder.button(text="⬅️ Назад в меню", callback_data="back_to_menu")
         builder.adjust(1)
+
         await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления клиентов: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка синхронизации: {e}", exc_info=True)
         await callback.message.edit_text(f"❌ Ошибка: {e}")
-
-
 # ---------- Возврат в меню ----------
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, bot: Bot):
