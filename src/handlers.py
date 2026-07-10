@@ -1539,6 +1539,226 @@ async def admin_send_message(message: Message, state: FSMContext, bot: Bot):
     )
     await state.clear()
 
+# ============================================
+# СИНХРОНИЗАЦИЯ КЛИЕНТОВ МЕЖДУ БД И ПАНЕЛЬЮ
+# ============================================
+
+@router.message(Command("sync_panel"))
+async def sync_panel_command(message: Message):
+    """Синхронизация клиентов между БД и панелью 3X-UI"""
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён. Только для администраторов."
+        )
+        return
+    
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text="🔄 Проверяю синхронизацию между БД и панелью..."
+    )
+    
+    try:
+        # Получаем клиентов из БД и панели
+        db_clients = {}
+        panel_clients = {}
+        
+        # Из БД
+        with Session() as session:
+            users = session.query(User).filter(User.vless_profile_data.isnot(None)).all()
+            for user in users:
+                try:
+                    profile = json.loads(user.vless_profile_data)
+                    if profile.get("email"):
+                        db_clients[profile["email"]] = {
+                            "client_id": profile.get("client_id"),
+                            "email": profile.get("email"),
+                            "subId": profile.get("subId") or user.subscription_token,
+                            "is_enabled": user.is_enabled_in_panel,
+                            "tgId": user.telegram_id,
+                            "full_name": user.full_name
+                        }
+                except:
+                    pass
+        
+        # Из панели
+        async with XUIAPI() as api:
+            inbound = await api.get_inbound(config.INBOUND_ID)
+            if inbound:
+                settings = json.loads(inbound.get("settings", "{}"))
+                for client in settings.get("clients", []):
+                    email = client.get("email")
+                    if email:
+                        panel_clients[email] = client
+        
+        # Сравниваем
+        db_emails = set(db_clients.keys())
+        panel_emails = set(panel_clients.keys())
+        
+        missing_in_panel = db_emails - panel_emails
+        extra_in_panel = panel_emails - db_emails
+        common = db_emails & panel_emails
+        
+        # Формируем отчет
+        text = (
+            f"📊 **Статус синхронизации:**\n\n"
+            f"👤 В БД: {len(db_emails)}\n"
+            f"📋 В панели: {len(panel_emails)}\n"
+            f"➕ Нужно добавить: {len(missing_in_panel)}\n"
+            f"➖ Лишних в панели: {len(extra_in_panel)}\n"
+            f"🔄 Совпадают: {len(common)}\n"
+        )
+        
+        if missing_in_panel:
+            text += f"\n📝 **Будут добавлены:**\n"
+            for email in list(missing_in_panel)[:10]:
+                text += f"• `{email}`\n"
+            if len(missing_in_panel) > 10:
+                text += f"... и еще {len(missing_in_panel) - 10}\n"
+        
+        if extra_in_panel:
+            text += f"\n⚠️ **Лишние в панели:**\n"
+            for email in list(extra_in_panel)[:10]:
+                text += f"• `{email}`\n"
+            if len(extra_in_panel) > 10:
+                text += f"... и еще {len(extra_in_panel) - 10}\n"
+        
+        # Кнопки действий
+        builder = InlineKeyboardBuilder()
+        if missing_in_panel:
+            builder.button(
+                text=f"✅ Добавить {len(missing_in_panel)} клиентов",
+                callback_data="confirm_sync_add"
+            )
+        builder.button(text="❌ Отмена", callback_data="back_to_menu")
+        builder.adjust(1)
+        
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=text,
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка синхронизации: {e}")
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка: {e}"
+        )
+
+
+@router.callback_query(F.data == "confirm_sync_add")
+async def confirm_sync_add(callback: CallbackQuery):
+    """Подтверждение добавления клиентов"""
+    await safe_answer_callback(callback, "⏳ Добавляю клиентов...")
+    
+    try:
+        # Получаем клиентов из БД, которых нет в панели
+        db_clients = {}
+        panel_emails = set()
+        
+        with Session() as session:
+            users = session.query(User).filter(User.vless_profile_data.isnot(None)).all()
+            for user in users:
+                try:
+                    profile = json.loads(user.vless_profile_data)
+                    if profile.get("email"):
+                        db_clients[profile["email"]] = {
+                            "client_id": profile.get("client_id"),
+                            "email": profile.get("email"),
+                            "subId": profile.get("subId") or user.subscription_token,
+                            "is_enabled": user.is_enabled_in_panel,
+                            "tgId": user.telegram_id,
+                            "full_name": user.full_name
+                        }
+                except:
+                    pass
+        
+        async with XUIAPI() as api:
+            inbound = await api.get_inbound(config.INBOUND_ID)
+            if inbound:
+                settings = json.loads(inbound.get("settings", "{}"))
+                for client in settings.get("clients", []):
+                    if client.get("email"):
+                        panel_emails.add(client.get("email"))
+        
+        missing = set(db_clients.keys()) - panel_emails
+        
+        if not missing:
+            await callback.message.edit_text("✅ Все клиенты уже в панели!")
+            return
+        
+        added = []
+        errors = []
+        
+        for email in missing:
+            try:
+                client_data = db_clients[email]
+                
+                client_settings = {
+                    "id": client_data["client_id"],
+                    "email": email,
+                    "flow": "xtls-rprx-vision",
+                    "limitIp": 2,
+                    "totalGB": 0,
+                    "expiryTime": 0,
+                    "enable": client_data.get("is_enabled", True),
+                    "tgId": client_data.get("tgId", 0),
+                    "subId": (client_data.get("subId") or email)[:16],
+                    "comment": client_data.get("full_name", "")
+                }
+                
+                payload = {
+                    "client": client_settings,
+                    "inboundIds": [config.INBOUND_ID]
+                }
+                
+                async with XUIAPI() as api:
+                    url = f"{api.base_url}{api.api_prefix}/clients/add"
+                    async with api.session.post(url, json=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("success"):
+                                added.append(email)
+                            else:
+                                errors.append(f"{email}: {data.get('msg', 'Unknown error')}")
+                        else:
+                            errors.append(f"{email}: HTTP {resp.status}")
+                            
+            except Exception as e:
+                errors.append(f"{email}: {str(e)}")
+        
+        # Результат
+        text = f"📊 **Результат синхронизации:**\n\n✅ Добавлено: {len(added)}\n❌ Ошибок: {len(errors)}"
+        
+        if added:
+            text += f"\n\n✅ **Добавлены:**\n"
+            for email in added[:10]:
+                text += f"• `{email}`\n"
+            if len(added) > 10:
+                text += f"... и еще {len(added) - 10}\n"
+        
+        if errors:
+            text += f"\n❌ **Ошибки:**\n"
+            for error in errors[:10]:
+                text += f"• {error}\n"
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад в меню", callback_data="back_to_menu")
+        builder.adjust(1)
+        
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления клиентов: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+
 @router.message(Command("addpromo"))
 async def add_promo_cmd(message: Message):
     user = await get_user(message.from_user.id)
