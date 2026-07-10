@@ -585,7 +585,6 @@ async def compare_links_command(message: Message, bot: Bot):
 
 @router.callback_query(F.data == "compare_links")
 async def compare_links_callback(callback: CallbackQuery, bot: Bot):
-    """Обработчик нажатия кнопки 'Сравнить ссылки' в админ-меню."""
     user = await get_user(callback.from_user.id)
     if not user or not user.is_admin:
         await safe_answer_callback(callback, "⛔ Доступ запрещён", show_alert=True)
@@ -593,7 +592,7 @@ async def compare_links_callback(callback: CallbackQuery, bot: Bot):
 
     await safe_answer_callback(callback, "🔄 Загружаю данные...")
 
-    # Создаём фейковое сообщение, чтобы переиспользовать логику команды /compare_links
+    # Создаём фейковое сообщение, передавая в него bot
     fake_message = Message(
         message_id=callback.message.message_id,
         date=callback.message.date,
@@ -602,8 +601,8 @@ async def compare_links_callback(callback: CallbackQuery, bot: Bot):
         text="/compare_links",
         bot=bot
     )
-    # Вызываем существующую функцию (она отправит новое сообщение с результатами)
-    await compare_links_command(fake_message)
+    # Вызываем существующую команду, передавая оба аргумента
+    await compare_links_command(fake_message, bot)
 
 @router.callback_query(F.data == "fix_mismatches")
 async def fix_mismatches(callback: CallbackQuery, bot: Bot):
