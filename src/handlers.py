@@ -1214,22 +1214,26 @@ async def sync_db_to_panel_callback(callback: CallbackQuery):
 
 
 @router.message(Command("sync_db_to_panel"))
-async def sync_db_to_panel_command(message: Message):
+async def sync_db_to_panel_command(message: Message, bot: Bot = None):
     """
     Синхронизирует панель 3X-UI с данными из БД (subId и enable).
     Время подписки (expiryTime) НЕ изменяется!
     """
+    # Если bot не передан явно, берём из message
+    if bot is None:
+        bot = message.bot
+
     user = await get_user(message.from_user.id)
     if not user or not user.is_admin:
         await safe_send_message(
-            bot=message.bot,
+            bot=bot,
             chat_id=message.from_user.id,
             text="⛔ Доступ запрещён. Только для администраторов."
         )
         return
 
     await safe_send_message(
-        bot=message.bot,
+        bot=bot,
         chat_id=message.from_user.id,
         text="🔄 Начинаю синхронизацию панели по данным из БД (без изменения времени подписки)..."
     )
@@ -1239,7 +1243,7 @@ async def sync_db_to_panel_command(message: Message):
 
     if not users_with_profile:
         await safe_send_message(
-            bot=message.bot,
+            bot=bot,
             chat_id=message.from_user.id,
             text="📭 Нет пользователей с профилем."
         )
@@ -1257,21 +1261,17 @@ async def sync_db_to_panel_command(message: Message):
                 if not email:
                     continue
 
-                # 1. Обновляем subId (обрезаем до 16 символов, как в панели)
+                # 1. Обновляем subId (используем тот, что в БД, без обрезания)
                 db_subid = profile.get("subId") or user.subscription_token
                 if db_subid:
-                    # Вместо panel_subid = db_subid[:16]
-                    panel_subid = db_subid  # Используем как есть
-                    await api.update_client_subid(email, panel_subid)
+                    # Используем subId как есть (он может быть 16 или 32 символа)
+                    await api.update_client_subid(email, db_subid)
 
                 # 2. Обновляем enable (вкл/выкл)
                 if user.is_enabled_in_panel:
                     await api.enable_client(email)
                 else:
                     await api.disable_client_by_email(email)
-
-                # 3. Время подписки НЕ обновляем!
-                # (expiryTime не трогаем)
 
                 updated += 1
                 logger.info(f"✅ Обновлён клиент {email} (subId и enable)")
@@ -1296,12 +1296,11 @@ async def sync_db_to_panel_command(message: Message):
             text += f"\n... и ещё {len(error_details) - 10}"
 
     await safe_send_message(
-        bot=message.bot,
+        bot=bot,
         chat_id=message.from_user.id,
         text=text,
         parse_mode="Markdown"
     )
-
 
 # ---------- Админ: изменение времени ----------
 @router.callback_query(F.data == "admin_add_time")
