@@ -5,16 +5,17 @@ import logging
 import secrets
 import uuid
 import sqlite3
+from typing import Dict, Any
 from datetime import datetime, timedelta
-from database import Session, User
 from aiogram.exceptions import TelegramForbiddenError
-from database import User, Session, engine  # добавьте engine
+
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup, InlineKeyboardButton
+
 from config import config
 from database import (
     StaticProfile, get_user, create_user, update_subscription,
@@ -43,6 +44,7 @@ from promo import (
     get_promo_by_code,
     list_promocodes
 )
+
 
 
 logger = logging.getLogger(__name__)
@@ -322,138 +324,52 @@ from sqlalchemy.orm import Session
 # from functions import create_vless_profile, safe_json_loads, XUIAPI, apply_tc_limit, enable_client_by_email
 # from database import User, Session, get_all_users
 
-async def sync_user_with_panel(
-    user,
-    subscription_days: int = 7,
-    force_create: bool = False,
-) -> Dict[str, Any]:
-    result = {
-        "profile": None,
-        "subscription_link": None,
-        "created": False,
-        "updated": False,
-        "error": None,
-    }
+@router.message(Command("fix_subids"))
+async def fix_subids(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.is_admin:
+        await safe_send_message(
+            bot=message.bot,
+            chat_id=message.from_user.id,
+            text="⛔ Доступ запрещён"
+        )
+        return
 
-    # 1. Профиль
-    profile = safe_json_loads(user.vless_profile_data)
-    if not profile or force_create:
-        profile = await create_vless_profile(user.telegram_id, subscription_days=subscription_days)
-        if not profile:
-            result["error"] = "Не удалось создать профиль"
-            return result
-        logger.info(f"📝 Создан новый профиль для user {user.telegram_id}")
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text="🔄 Синхронизация всех пользователей с панелью..."
+    )
 
-    email = profile.get("email")
-    if not email:
-        email = f"user_{user.telegram_id}"
-        profile["email"] = email
+    all_users = await get_all_users()
+    total = len(all_users)
+    created = 0
+    updated = 0
+    errors = 0
 
-    # 2. Работа с панелью
-    async with XUIAPI() as api:
-        inbound = await api.get_inbound(config.INBOUND_ID)
-        if not inbound:
-            result["error"] = "Не удалось получить инбаунд"
-            return result
+    for u in all_users:
+        result = await sync_user_with_panel(u, subscription_days=7)
+        if result.get("error"):
+            errors += 1
+            logger.error(f"Ошибка синхронизации {u.telegram_id}: {result['error']}")
+        else:
+            if result.get("created"):
+                created += 1
+            if result.get("updated"):
+                updated += 1
+        await asyncio.sleep(0.2)
 
-        settings = safe_json_loads(inbound.get("settings"))
-        if not isinstance(settings, dict):
-            settings = {}
-
-        clients = settings.get("clients", [])
-        panel_emails = {c.get("email") for c in clients if c.get("email")}
-
-        # Проверяем, есть ли клиент с таким email в панели
-        client_exists = await api.find_client_by_email(email=email, sub_id=profile.get("subId"))
-
-        if not client_exists:
-            # Пытаемся добавить клиента
-            logger.info(f"➕ Добавляем клиента {email} в инбаунд")
-            add_ok = await api.add_client(
-                inbound_id=config.INBOUND_ID,
-                email=email,
-                uuid=profile.get("id"),
-                totalGB=0,
-                expiryTime=0,
-                enable=True,
-                flow=profile.get("flow", "xtls-rprx-vision"),
-                sub_id=profile.get("subId")
-            )
-            if not add_ok:
-                # Если добавить не удалось, возможно клиент уже есть (дубликат)
-                # Проверим ещё раз, возможно email изменился или есть другой с таким же
-                # Попробуем найти клиента по email через API
-                found_client = await api.find_client_by_email(email=email, sub_id=profile.get("subId"))
-                if found_client:
-                    logger.info(f"🔍 Клиент {email} найден в панели (вероятно, уже существовал)")
-                    client_exists = True
-                    # Используем найденного клиента
-                    clients = [found_client]  # или обновляем список
-                else:
-                    result["error"] = f"Ошибка добавления клиента {email}"
-                    return result
-            else:
-                result["created"] = True
-                client_exists = True  # теперь он точно есть
-                # Применяем ограничение скорости
-                client_ip = profile.get("client_ip")
-                if client_ip:
-                    try:
-                        await apply_tc_limit(client_ip)
-                    except FileNotFoundError:
-                        logger.warning(f"⚠️ Скрипт tc_limit.sh не найден, пропускаем ограничение для {client_ip}")
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка применения tc limit для {client_ip}: {e}")
-
-        # Если клиент существует (или был только что создан) – проверяем subId
-        if client_exists:
-            # Получаем актуального клиента из панели (обновлённый список)
-            if not result["created"]:
-                # Если не создавали, нужно получить клиента из панели для обновления subId
-                # Используем метод find_client_by_email
-                panel_client = await api.find_client_by_email(email)
-                if not panel_client:
-                    result["error"] = f"Не удалось найти клиента {email} в панели"
-                    return result
-            else:
-                # После успешного создания клиента получаем его свежие данные через find_client_by_email
-                panel_client = await api.find_client_by_email(email)
-                if not panel_client:
-                    result["error"] = f"Не удалось найти клиента {email} после создания"
-                    return result
-
-            if panel_client:
-                current_sub = panel_client.get("subId", "")
-                if not current_sub:
-                    new_subid = secrets.token_hex(16)
-                    update_ok = await api.update_client_subid(email, new_subid)
-                    if not update_ok:
-                        result["error"] = f"Не удалось обновить subId для {email}"
-                        return result
-                    profile["subId"] = new_subid
-                    result["updated"] = True
-                    logger.info(f"🔄 Обновлён subId для {email} -> {new_subid[:8]}...")
-                else:
-                    profile["subId"] = current_sub
-
-    # 3. Сохраняем профиль в БД
-    with Session(bind=engine) as session:
-        db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-        if db_user:
-            db_user.vless_profile_data = json.dumps(profile)
-            db_user.subscription_token = profile.get("subId")
-            if result["created"] or force_create:
-                db_user.subscription_end = datetime.utcnow() + timedelta(days=subscription_days)
-                db_user.is_enabled_in_panel = True
-            session.commit()
-
-    # 4. Ссылка на подписку
-    sub_id = profile.get("subId")
-    if sub_id:
-        result["subscription_link"] = f"https://panel.marlin.fit:2096/u7dGkL9pQw2rXyZ/{sub_id}"
-    result["profile"] = profile
-    return result
-
+    await safe_send_message(
+        bot=message.bot,
+        chat_id=message.from_user.id,
+        text=(
+            f"✅ Синхронизация завершена!\n"
+            f"👥 Всего пользователей: {total}\n"
+            f"🆕 Добавлено клиентов: {created}\n"
+            f"🔄 Обновлено subId: {updated}\n"
+            f"❌ Ошибок: {errors}"
+        )
+    )
 @router.message(Command("compare_links"))
 async def compare_links_command(message: Message, bot: Bot):
     user = await get_user(message.from_user.id)
@@ -480,15 +396,13 @@ async def compare_links_command(message: Message, bot: Bot):
             settings = {}
         panel_clients = settings.get("clients", [])
 
-    # Словари: email -> subId, subId -> email (из панели)
     panel_by_email = {c.get("email"): c for c in panel_clients if c.get("email")}
     panel_by_subid = {c.get("subId"): c for c in panel_clients if c.get("subId")}
 
-    mismatches = []          # subId не совпадает
-    missing_in_panel = []    # есть в БД, нет в панели (ни по email, ни по subId)
-    missing_in_db = []       # есть в панели, нет в БД
+    mismatches = []
+    missing_in_panel = []
+    missing_in_db = []
 
-    # Собираем subId из БД
     db_subids = set()
     db_emails = set()
 
@@ -502,7 +416,6 @@ async def compare_links_command(message: Message, bot: Bot):
         if email:
             db_emails.add(email)
 
-        # Ищем в панели по subId, если нет – по email
         panel_client = panel_by_subid.get(sub_id)
         if not panel_client and email:
             panel_client = panel_by_email.get(email)
@@ -519,7 +432,6 @@ async def compare_links_command(message: Message, bot: Bot):
                 "panel_sub": panel_sub
             })
 
-    # Ищем клиентов в панели, которых нет в БД
     for c in panel_clients:
         email = c.get("email")
         sub_id = c.get("subId")
@@ -527,10 +439,8 @@ async def compare_links_command(message: Message, bot: Bot):
             continue
         if email and email in db_emails:
             continue
-        # Если не нашли ни по subId, ни по email – клиент лишний
         missing_in_db.append(f"{email} (subId={sub_id})")
 
-    # Формируем отчёт
     report = "📊 **Сравнение ссылок (subId):**\n\n"
 
     if missing_in_panel:
@@ -573,23 +483,16 @@ async def compare_links_command(message: Message, bot: Bot):
 
 @router.callback_query(F.data == "fix_mismatches")
 async def fix_mismatches(callback: CallbackQuery, bot: Bot):
-    """Перенаправляет на выполнение /fix_subids"""
     await safe_answer_callback(callback, "🔧 Запускаю синхронизацию...")
-    # Создаём имитацию сообщения для вызова fix_subids
     fake_message = Message(
         message_id=callback.message.message_id,
         date=callback.message.date,
         chat=callback.message.chat,
         from_user=callback.from_user,
-        text="/fix_subids"
+        text="/fix_subids",
+        bot=bot
     )
-    await fix_subids(fake_message)  # предполагается, что fix_subids определён
-    # Или просто отправляем инструкцию
-    await safe_send_message(
-        bot=bot,
-        chat_id=callback.from_user.id,
-        text="ℹ️ Воспользуйтесь командой /fix_subids для полной синхронизации."
-    )
+    await fix_subids(fake_message)
 
 @router.callback_query(F.data == "admin_promo_stats")
 async def admin_promo_stats_list(callback: CallbackQuery):
