@@ -1562,33 +1562,40 @@ async def sync_panel_command(message: Message):
     )
     
     try:
-        # Получаем клиентов из БД и панели
+        # Получаем клиентов из БД
         db_clients = {}
-        panel_clients = {}
-        
-        # Из БД
         with Session() as session:
-            users = session.query(User).filter(User.vless_profile_data.isnot(None)).all()
+            # Используем правильный запрос
+            users = session.query(User).all()
             for user in users:
-                try:
-                    profile = json.loads(user.vless_profile_data)
-                    if profile.get("email"):
-                        db_clients[profile["email"]] = {
-                            "client_id": profile.get("client_id"),
-                            "email": profile.get("email"),
-                            "subId": profile.get("subId") or user.subscription_token,
-                            "is_enabled": user.is_enabled_in_panel,
-                            "tgId": user.telegram_id,
-                            "full_name": user.full_name
-                        }
-                except:
-                    pass
+                if user.vless_profile_data:
+                    try:
+                        profile = json.loads(user.vless_profile_data)
+                        email = profile.get("email")
+                        if email:
+                            db_clients[email] = {
+                                "client_id": profile.get("client_id"),
+                                "email": email,
+                                "subId": profile.get("subId") or user.subscription_token,
+                                "is_enabled": user.is_enabled_in_panel,
+                                "tgId": user.telegram_id,
+                                "full_name": user.full_name,
+                                "user_id": user.id
+                            }
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка парсинга профиля {user.telegram_id}: {e}")
         
-        # Из панели
+        # Получаем клиентов из панели
+        panel_clients = {}
         async with XUIAPI() as api:
             inbound = await api.get_inbound(config.INBOUND_ID)
             if inbound:
-                settings = json.loads(inbound.get("settings", "{}"))
+                settings_raw = inbound.get("settings", {})
+                if isinstance(settings_raw, str):
+                    settings = json.loads(settings_raw)
+                else:
+                    settings = settings_raw
+                
                 for client in settings.get("clients", []):
                     email = client.get("email")
                     if email:
@@ -1646,6 +1653,8 @@ async def sync_panel_command(message: Message):
         
     except Exception as e:
         logger.error(f"❌ Ошибка синхронизации: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
@@ -1659,31 +1668,38 @@ async def confirm_sync_add(callback: CallbackQuery):
     await safe_answer_callback(callback, "⏳ Добавляю клиентов...")
     
     try:
-        # Получаем клиентов из БД, которых нет в панели
+        # Получаем клиентов из БД
         db_clients = {}
-        panel_emails = set()
-        
         with Session() as session:
-            users = session.query(User).filter(User.vless_profile_data.isnot(None)).all()
+            users = session.query(User).all()
             for user in users:
-                try:
-                    profile = json.loads(user.vless_profile_data)
-                    if profile.get("email"):
-                        db_clients[profile["email"]] = {
-                            "client_id": profile.get("client_id"),
-                            "email": profile.get("email"),
-                            "subId": profile.get("subId") or user.subscription_token,
-                            "is_enabled": user.is_enabled_in_panel,
-                            "tgId": user.telegram_id,
-                            "full_name": user.full_name
-                        }
-                except:
-                    pass
+                if user.vless_profile_data:
+                    try:
+                        profile = json.loads(user.vless_profile_data)
+                        email = profile.get("email")
+                        if email:
+                            db_clients[email] = {
+                                "client_id": profile.get("client_id"),
+                                "email": email,
+                                "subId": profile.get("subId") or user.subscription_token,
+                                "is_enabled": user.is_enabled_in_panel,
+                                "tgId": user.telegram_id,
+                                "full_name": user.full_name
+                            }
+                    except:
+                        pass
         
+        # Получаем список email из панели
+        panel_emails = set()
         async with XUIAPI() as api:
             inbound = await api.get_inbound(config.INBOUND_ID)
             if inbound:
-                settings = json.loads(inbound.get("settings", "{}"))
+                settings_raw = inbound.get("settings", {})
+                if isinstance(settings_raw, str):
+                    settings = json.loads(settings_raw)
+                else:
+                    settings = settings_raw
+                
                 for client in settings.get("clients", []):
                     if client.get("email"):
                         panel_emails.add(client.get("email"))
@@ -1697,42 +1713,45 @@ async def confirm_sync_add(callback: CallbackQuery):
         added = []
         errors = []
         
-        for email in missing:
-            try:
-                client_data = db_clients[email]
-                
-                client_settings = {
-                    "id": client_data["client_id"],
-                    "email": email,
-                    "flow": "xtls-rprx-vision",
-                    "limitIp": 2,
-                    "totalGB": 0,
-                    "expiryTime": 0,
-                    "enable": client_data.get("is_enabled", True),
-                    "tgId": client_data.get("tgId", 0),
-                    "subId": (client_data.get("subId") or email)[:16],
-                    "comment": client_data.get("full_name", "")
-                }
-                
-                payload = {
-                    "client": client_settings,
-                    "inboundIds": [config.INBOUND_ID]
-                }
-                
-                async with XUIAPI() as api:
+        async with XUIAPI() as api:
+            for email in missing:
+                try:
+                    client_data = db_clients[email]
+                    
+                    # Формируем payload для добавления клиента
+                    client_settings = {
+                        "id": client_data["client_id"],
+                        "email": email,
+                        "flow": "xtls-rprx-vision",
+                        "limitIp": 2,
+                        "totalGB": 0,
+                        "expiryTime": 0,
+                        "enable": client_data.get("is_enabled", True),
+                        "tgId": client_data.get("tgId", 0),
+                        "subId": (client_data.get("subId") or email)[:16],
+                        "comment": client_data.get("full_name", "")
+                    }
+                    
+                    payload = {
+                        "client": client_settings,
+                        "inboundIds": [config.INBOUND_ID]
+                    }
+                    
                     url = f"{api.base_url}{api.api_prefix}/clients/add"
                     async with api.session.post(url, json=payload) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             if data.get("success"):
                                 added.append(email)
+                                logger.info(f"✅ Добавлен клиент: {email}")
                             else:
                                 errors.append(f"{email}: {data.get('msg', 'Unknown error')}")
                         else:
                             errors.append(f"{email}: HTTP {resp.status}")
                             
-            except Exception as e:
-                errors.append(f"{email}: {str(e)}")
+                except Exception as e:
+                    errors.append(f"{email}: {str(e)}")
+                    logger.error(f"❌ Ошибка добавления {email}: {e}")
         
         # Результат
         text = f"📊 **Результат синхронизации:**\n\n✅ Добавлено: {len(added)}\n❌ Ошибок: {len(errors)}"
@@ -1748,6 +1767,8 @@ async def confirm_sync_add(callback: CallbackQuery):
             text += f"\n❌ **Ошибки:**\n"
             for error in errors[:10]:
                 text += f"• {error}\n"
+            if len(errors) > 10:
+                text += f"... и еще {len(errors) - 10}\n"
         
         builder = InlineKeyboardBuilder()
         builder.button(text="⬅️ Назад в меню", callback_data="back_to_menu")
@@ -1757,6 +1778,8 @@ async def confirm_sync_add(callback: CallbackQuery):
         
     except Exception as e:
         logger.error(f"❌ Ошибка добавления клиентов: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         await callback.message.edit_text(f"❌ Ошибка: {e}")
 
 @router.message(Command("addpromo"))
