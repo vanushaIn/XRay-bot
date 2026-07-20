@@ -1349,15 +1349,6 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
 
     try:
         months, days, hours, minutes = map(int, parts)
-        # Проверяем, что все числа неотрицательные
-        if months < 0 or days < 0 or hours < 0 or minutes < 0:
-            await safe_send_message(
-                bot=message.bot,
-                chat_id=message.from_user.id,
-                text="❌ Все числа должны быть неотрицательными."
-            )
-            return
-
         total_seconds = (
             months * 30 * 24 * 60 * 60 +
             days * 24 * 60 * 60 +
@@ -1365,6 +1356,7 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
             minutes * 60
         )
 
+        # ✅ ВСЯ РАБОТА С БАЗОЙ ВНУТРИ ОДНОЙ СЕССИИ
         with Session() as session:
             user = session.query(User).filter_by(telegram_id=user_id).first()
             if not user:
@@ -1381,8 +1373,7 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
             else:
                 user.subscription_end = now + timedelta(seconds=total_seconds)
 
-            # Включаем клиента в панели, если есть профиль
-            email = None
+            # ✅ ВСЁ ВНУТРИ СЕССИИ
             if user.vless_profile_data:
                 try:
                     profile = json.loads(user.vless_profile_data)
@@ -1390,7 +1381,6 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
                     if email:
                         async with XUIAPI() as api:
                             await api.enable_client(email)
-                            # Синхронизируем expiryTime в панели с новым временем
                             expiry_ms = int(user.subscription_end.timestamp() * 1000)
                             await api.update_client_expiry(email, expiry_ms)
                         user.is_enabled_in_panel = True
@@ -1398,15 +1388,15 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
                     logger.warning(f"⚠️ Не удалось обновить клиента в панели: {e}")
 
             session.commit()
+            
+            # ✅ Сохраняем данные ДО закрытия сессии
+            subscription_end = user.subscription_end
 
-        # Если email был получен, но что-то пошло не так, сообщим
-        if user.vless_profile_data and not email:
-            logger.warning(f"⚠️ Не найден email в профиле пользователя {user_id}")
-
+        # ✅ Используем сохранённые данные ПОСЛЕ закрытия сессии
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text=f"✅ Добавлено время пользователю {user_id}. Новый срок: {user.subscription_end.strftime('%d.%m.%Y %H:%M')}"
+            text=f"✅ Добавлено время пользователю {user_id}. Новый срок: {subscription_end.strftime('%d.%m.%Y %H:%M')}"
         )
 
     except Exception as e:
