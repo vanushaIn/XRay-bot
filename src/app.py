@@ -143,10 +143,7 @@ async def check_subscriptions(bot: Bot):
                                 if db_user:
                                     db_user.is_enabled_in_panel = False
                                     session.commit()
-                            await bot.send_message(
-                                user.telegram_id,
-                                "❌ Ваша подписка истекла! Доступ к VPN отключён. Продлите подписку, чтобы восстановить доступ."
-                            )
+                            
                         else:
                             logger.warning(f"⚠️ Failed to disable client {profile['email']} from inbound")
                     except Exception as e:
