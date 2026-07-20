@@ -1302,7 +1302,7 @@ async def sync_db_to_panel_command(message: Message, bot: Bot = None):
         parse_mode="Markdown"
     )
 
-# ---------- Админ: изменение времени ----------
+# ---------- Админ: добавление времени ----------
 @router.callback_query(F.data == "admin_add_time")
 async def admin_add_time_start(callback: CallbackQuery, state: FSMContext):
     await safe_answer_callback(callback)
@@ -1349,6 +1349,15 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
 
     try:
         months, days, hours, minutes = map(int, parts)
+        # Проверяем, что все числа неотрицательные
+        if months < 0 or days < 0 or hours < 0 or minutes < 0:
+            await safe_send_message(
+                bot=message.bot,
+                chat_id=message.from_user.id,
+                text="❌ Все числа должны быть неотрицательными."
+            )
+            return
+
         total_seconds = (
             months * 30 * 24 * 60 * 60 +
             days * 24 * 60 * 60 +
@@ -1372,6 +1381,8 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
             else:
                 user.subscription_end = now + timedelta(seconds=total_seconds)
 
+            # Включаем клиента в панели, если есть профиль
+            email = None
             if user.vless_profile_data:
                 try:
                     profile = json.loads(user.vless_profile_data)
@@ -1379,16 +1390,23 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
                     if email:
                         async with XUIAPI() as api:
                             await api.enable_client(email)
+                            # Синхронизируем expiryTime в панели с новым временем
+                            expiry_ms = int(user.subscription_end.timestamp() * 1000)
+                            await api.update_client_expiry(email, expiry_ms)
                         user.is_enabled_in_panel = True
                 except Exception as e:
-                    logger.warning(f"⚠️ Не удалось включить клиента: {e}")
+                    logger.warning(f"⚠️ Не удалось обновить клиента в панели: {e}")
 
             session.commit()
+
+        # Если email был получен, но что-то пошло не так, сообщим
+        if user.vless_profile_data and not email:
+            logger.warning(f"⚠️ Не найден email в профиле пользователя {user_id}")
 
         await safe_send_message(
             bot=message.bot,
             chat_id=message.from_user.id,
-            text=f"✅ Добавлено время пользователю {user_id}"
+            text=f"✅ Добавлено время пользователю {user_id}. Новый срок: {user.subscription_end.strftime('%d.%m.%Y %H:%M')}"
         )
 
     except Exception as e:
@@ -1400,7 +1418,6 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
         )
     finally:
         await state.clear()
-
 
 @router.callback_query(F.data == "admin_remove_time")
 async def admin_remove_time_start(callback: CallbackQuery, state: FSMContext):
